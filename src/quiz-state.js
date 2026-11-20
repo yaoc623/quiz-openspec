@@ -13,6 +13,8 @@ class QuizState {
     this.finishedAt = null;
     this.fairModeEnabled = false;
     this.fairDelaySeconds = 3;
+    this.revealIndex = -1;
+    this.revealModeActive = false;
   }
 
   setGroupCount(count) {
@@ -26,6 +28,8 @@ class QuizState {
     this.submissions = [];
     this.sequence = 0;
     this.writebackCompleted = false;
+    this.revealIndex = -1;
+    this.revealModeActive = false;
   }
 
   setTimerLimit(seconds) {
@@ -69,10 +73,20 @@ class QuizState {
     this.finishedAt = null;
     this.fairModeEnabled = false;
     this.fairDelaySeconds = 3;
+    this.revealIndex = -1;
+    this.revealModeActive = false;
   }
 
   markWritebackCompleted() {
     this.writebackCompleted = true;
+  }
+
+  setRevealIndex(index) {
+    if (this.phase !== '已結束') throw new Error('活動結束後才能使用揭曉模式。');
+    const max = this.worksheet?.questions.length ?? 0;
+    if (!Number.isInteger(index) || index < -1 || index > max) throw new Error('揭曉題目超出範圍。');
+    this.revealModeActive = true;
+    this.revealIndex = index;
   }
 
   submit(group, questionNumber, answers) {
@@ -146,6 +160,8 @@ class QuizState {
     const base = { groupCount: this.groupCount, phase: this.phase, questions: this.worksheet?.questions.map(({ number, subquestions }) => ({ number, subquestions: subquestions.map((item) => ({ label: item.label })) })) ?? [] };
     base.timer = this.timerSnapshot(now);
     base.fairModeEnabled = this.fairModeEnabled;
+    base.revealIndex = this.revealIndex;
+    base.revealModeActive = this.revealModeActive;
     if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 && !entry.rejected })), leaderboard: this.leaderboard() };
     const group = role?.group;
     if (this.phase === '已結束') {
@@ -154,7 +170,9 @@ class QuizState {
         return winner ? { questionNumber: question.number, group: winner.group, answers: [...winner.answers] } : { questionNumber: question.number, group: null, answers: [], noCorrectAnswer: this.submissions.some((entry) => entry.questionNumber === question.number && entry.rejected) };
       }) ?? [];
       const rejectedSubmissions = this.submissions.filter((entry) => entry.rejected).map(({ group: rejectedGroup, questionNumber, sequence }) => ({ group: rejectedGroup, questionNumber, sequence }));
-      return { ...base, winners, rejectedSubmissions, leaderboard: this.leaderboard() };
+      if (!this.revealModeActive) return { ...base, winners, rejectedSubmissions, leaderboard: this.leaderboard() };
+      const visibleWinners = this.revealIndex < 0 ? [] : winners.slice(0, this.revealIndex + 1);
+      return { ...base, winners: visibleWinners, rejectedSubmissions: rejectedSubmissions.filter((entry) => this.worksheet.questions.findIndex((question) => question.number === entry.questionNumber) <= this.revealIndex), leaderboard: this.revealIndex >= (this.worksheet?.questions.length ?? 0) ? this.leaderboard() : undefined };
     }
     return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt, rejected }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt, rejected })) };
   }

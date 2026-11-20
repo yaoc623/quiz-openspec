@@ -375,3 +375,34 @@ test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 
     assert.match(content, /2,b,2,題組乙/);
   } finally { await new Promise((resolve) => service.io.close(resolve)); }
 });
+
+test('揭曉控制限教師，學生即時只收到已揭曉結果且重連取得目前進度', { timeout: 10000 }, async () => {
+  const service = createQuizServer({ importWorksheet: async () => ({ spreadsheetId: 'reveal-sheet', parsed: { questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{}] }] } }) });
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  const clients = [];
+  const connect = (role, group) => { const client = createClient(base, { auth: { role, group }, transports: ['websocket'] }); clients.push(client); return client; };
+  try {
+    const teacher = connect('teacher');
+    const student = connect('student', 1);
+    await Promise.all([nextEvent(teacher, 'state'), nextEvent(student, 'state')]);
+    await request(base, '/api/worksheet/import', { url: 'mock-url' });
+    service.state.start(); service.state.submit(1, '1', ['已揭曉答案']); service.state.submit(1, '2', ['尚未揭曉答案']); service.state.finish();
+    const initial = nextEvent(student, 'state');
+    await request(base, '/api/reveal', { index: -1 });
+    const hidden = await initial;
+    assert.equal(hidden.winners.length, 0);
+    assert.equal(JSON.stringify(hidden).includes('尚未揭曉答案'), false);
+    const denied = await fetch(`${base}/api/reveal`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'student' }, body: JSON.stringify({ index: 0 }) });
+    assert.equal(denied.status, 403);
+    const firstReveal = nextEvent(student, 'state');
+    await request(base, '/api/reveal', { index: 0 });
+    const visible = await firstReveal;
+    assert.deepEqual(visible.winners.map((winner) => winner.questionNumber), ['1']);
+    assert.equal(JSON.stringify(visible).includes('尚未揭曉答案'), false);
+    const reconnect = connect('student', 2);
+    const resumed = await nextEvent(reconnect, 'state');
+    assert.equal(resumed.revealIndex, 0);
+    assert.deepEqual(resumed.winners.map((winner) => winner.questionNumber), ['1']);
+  } finally { clients.forEach((client) => client.close()); await new Promise((resolve) => service.io.close(resolve)); }
+});

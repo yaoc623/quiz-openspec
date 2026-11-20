@@ -33,7 +33,7 @@ class FakeElement {
 }
 
 function bootClient() {
-  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'download-csv', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode'];
+  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'download-csv', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode', 'open-reveal', 'reveal-stage'];
   const elements = new Map(ids.map((id) => [id, new FakeElement(id)]));
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
@@ -51,6 +51,7 @@ function bootClient() {
       throw new Error(`未支援的選擇器：${selector}`);
     },
     createElement() { const element = new FakeElement(); createdElements.push(element); return element; }
+    ,addEventListener() {}
   };
   const context = {
     document,

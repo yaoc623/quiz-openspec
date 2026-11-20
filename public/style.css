@@ -39,3 +39,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 label:has(#fair-mode-enabled) { display: flex; align-items: center; gap: 8px; }
 #fair-mode-enabled { width: auto; min-height: auto; }
 @media (max-width: 600px) { .inline { align-items: stretch; flex-direction: column; } .status-row { align-items: start; } .card { padding: 18px; } }
+.reveal-stage:fullscreen { background: #081c2b; color: #fff; min-height: 100vh; width: 100vw; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 4rem; }
+.reveal-stage:fullscreen h1 { font-size: clamp(3rem, 10vw, 8rem); }
+.reveal-stage:fullscreen .reveal-answer { font-size: clamp(2rem, 6vw, 5rem); animation: reveal-flip .55s ease-out; }
+.reveal-controls { display: flex; gap: 1rem; justify-content: center; margin-top: 2rem; }
+.podium { font-size: 2rem; animation: reveal-flip .6s ease-out; }
+.podium-1 { color: #ffd54f; font-size: 3rem; }
+.podium-2 { color: #d6e2ef; }
+.podium-3 { color: #e7a875; }
+@keyframes reveal-flip { from { opacity: 0; transform: perspective(600px) rotateY(90deg) scale(.9); } to { opacity: 1; transform: perspective(600px) rotateY(0) scale(1); } }

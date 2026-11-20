@@ -6,6 +6,7 @@ const teacherTools = document.querySelector('#teacher-tools');
 const studentWork = document.querySelector('#student-work');
 const answerList = document.querySelector('#answer-list');
 const results = document.querySelector('#results');
+const revealStage = document.querySelector('#reveal-stage');
 const notice = document.querySelector('#notice');
 let socket;
 let currentRole;
@@ -13,6 +14,7 @@ let latestState;
 let groupCount = 4;
 let timerAnchorRemaining = null;
 let timerAnchorClientTime = 0;
+let teacherRevealOpen = false;
 
 function showNotice(message, error = false) {
   notice.textContent = message;
@@ -102,6 +104,7 @@ function renderState(value) {
     document.querySelector('#writeback').disabled = value.phase !== '已結束';
     document.querySelector('#download-csv').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
+    document.querySelector('#open-reveal').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#timer-limit').disabled = !canEdit;
     document.querySelector('#custom-seconds').disabled = !canEdit;
     document.querySelector('#save-timer').disabled = !canEdit;
@@ -175,11 +178,12 @@ function renderState(value) {
       const heading = document.createElement('h3');
       heading.textContent = value.fairModeEnabled ? '搶答結果（公平模式）' : '搶答結果（未使用公平模式）';
       results.replaceChildren(heading);
-      (value.winners ?? []).forEach((winner) => {
+      value.questions.forEach((question, index) => {
+        const winner = (value.winners ?? []).find((item) => item.questionNumber === question.number);
         const row = document.createElement('article');
         row.className = 'result';
         const text = document.createElement('p');
-        text.textContent = winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`;
+        text.textContent = winner ? (winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`) : `第 ${question.number} 題：尚未揭曉`;
         row.append(text);
         results.append(row);
       });
@@ -191,12 +195,68 @@ function renderState(value) {
         row.append(text);
         results.append(row);
       });
-      renderLeaderboard(value.leaderboard);
+      if (value.leaderboard) renderLeaderboard(value.leaderboard);
     }
   }
   renderTimer();
+  renderReveal(value);
   updateGroupOptions(value.groupCount || groupCount);
 }
+
+function renderReveal(value) {
+  revealStage.classList.add('hidden');
+  if (value.phase !== '已結束' || (currentRole === 'teacher' && !teacherRevealOpen) || (currentRole !== 'teacher' && value.revealIndex < 0)) return;
+  revealStage.classList.remove('hidden');
+  revealStage.replaceChildren();
+  const heading = document.createElement('h1');
+  const index = value.revealIndex ?? -1;
+  const questions = value.questions ?? [];
+  if (index >= questions.length) {
+    heading.textContent = '最終排行榜';
+    revealStage.append(heading);
+    (value.leaderboard ?? []).forEach((entry, place) => {
+      const line = document.createElement('p');
+      line.className = place < 3 ? `podium podium-${place + 1}` : '';
+      line.textContent = `${place < 3 ? ['🥇', '🥈', '🥉'][place] : `${place + 1}.`} 第 ${entry.group} 組｜${entry.score} 分`;
+      revealStage.append(line);
+    });
+  } else if (index < 0) {
+    heading.textContent = '準備揭曉';
+    revealStage.append(heading);
+  } else {
+    const question = questions[index];
+    heading.textContent = `第 ${question.number} 題`;
+    revealStage.append(heading);
+    const winner = currentRole === 'teacher'
+      ? (value.submissions ?? []).find((entry) => entry.questionNumber === question.number && entry.rank === 1 && !entry.rejected)
+      : (value.winners ?? []).find((entry) => entry.questionNumber === question.number);
+    const answer = document.createElement('p');
+    answer.className = 'reveal-answer';
+    answer.textContent = winner?.group ? `第 ${winner.group} 組｜${winner.answers.join('、')}｜順位 1` : '無人答對';
+    revealStage.append(answer);
+  }
+  if (currentRole === 'teacher') {
+    const controls = document.createElement('div'); controls.className = 'reveal-controls';
+    const prev = document.createElement('button'); prev.textContent = '上一題'; prev.disabled = index <= -1; prev.onclick = () => changeReveal(index - 1);
+    const next = document.createElement('button'); next.textContent = index >= questions.length ? '已全部揭曉' : '下一題'; next.disabled = index >= questions.length; next.onclick = () => changeReveal(index + 1);
+    const close = document.createElement('button'); close.textContent = '離開投影'; close.className = 'secondary'; close.onclick = () => { revealStage.classList.add('hidden'); document.exitFullscreen?.(); };
+    controls.append(prev, next, close); revealStage.append(controls);
+  }
+}
+
+async function changeReveal(index) {
+  try { await api('/api/reveal', { method: 'POST', body: JSON.stringify({ index }) }); }
+  catch (error) { showNotice(error.message, true); }
+}
+
+document.querySelector('#open-reveal').addEventListener('click', () => {
+  teacherRevealOpen = true; revealStage.classList.remove('hidden'); revealStage.requestFullscreen?.(); renderReveal(latestState); changeReveal(-1);
+});
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) { teacherRevealOpen = false; revealStage.classList.add('hidden'); } });
+document.addEventListener('keydown', (event) => {
+  if (currentRole !== 'teacher' || revealStage.classList.contains('hidden') || !['ArrowRight', 'ArrowLeft'].includes(event.key)) return;
+  event.preventDefault(); changeReveal((latestState?.revealIndex ?? -1) + (event.key === 'ArrowRight' ? 1 : -1));
+});
 
 function renderTimer() {
   const display = document.querySelector('#timer-display');

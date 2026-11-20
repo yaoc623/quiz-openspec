@@ -122,6 +122,14 @@ function createQuizServer(options = {}) {
     catch (error) { res.status(400).json({ error: error.message }); }
   });
 
+  app.post('/api/reveal', requireTeacher, (req, res) => {
+    try {
+      state.setRevealIndex(Number(req.body.index));
+      sendState();
+      res.json({ revealIndex: state.revealIndex });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
   app.post('/api/submissions/:sequence/reject', requireTeacher, (req, res) => {
     try {
       const entry = state.reviewSubmission(req.params.sequence, true);

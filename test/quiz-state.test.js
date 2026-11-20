@@ -246,3 +246,29 @@ test('駁回最後一筆答案後結果標示無人答對，公平模式新權�
   assert.equal(state.publicState({ group: 1 }).winners[0].noCorrectAnswer, true);
   assert.equal(state.publicState({ group: 1 }).winners[0].group, null);
 });
+
+test('揭曉模式只向學生公開目前已揭曉題目並在全部完成後顯示排行榜', () => {
+  const state = new QuizState();
+  state.setGroupCount(2);
+  state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{}] }] });
+  state.start();
+  state.submit(1, '1', ['第一題答案']);
+  state.submit(2, '2', ['第二題答案']);
+  state.finish();
+
+  const ordinaryResults = state.publicState({ group: 1 });
+  assert.equal(ordinaryResults.winners.length, 2);
+  state.setRevealIndex(-1);
+  const hidden = state.publicState({ group: 1 });
+  assert.deepEqual(hidden.winners, []);
+  assert.equal(hidden.leaderboard, undefined);
+  assert.equal(JSON.stringify(hidden).includes('第一題答案'), false);
+  state.setRevealIndex(0);
+  const first = state.publicState({ group: 1 });
+  assert.deepEqual(first.winners.map((winner) => winner.questionNumber), ['1']);
+  assert.equal(JSON.stringify(first).includes('第二題答案'), false);
+  state.setRevealIndex(2);
+  assert.equal(state.publicState({ group: 1 }).leaderboard.length, 2);
+  assert.equal(state.publicState('teacher').submissions.length, 2);
+  assert.throws(() => state.setRevealIndex(3), /超出範圍/);
+});

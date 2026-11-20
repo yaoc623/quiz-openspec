@@ -85,6 +85,42 @@ async function flushInitialization() {
   await Promise.resolve();
 }
 
+test('教師與學生依階段顯示已設定時限、倒數及停止狀態', async () => {
+  for (const role of ['teacher', 'student']) {
+    const client = bootClient();
+    await flushInitialization();
+    client.elements.get('role').value = role;
+    await client.elements.get('join').handlers.click();
+    const socket = client.sockets[0];
+    const display = client.elements.get('timer-display');
+    const state = { activityId: 'round', groupCount: 4, questions: [], submissions: [] };
+    const receive = (phase, limitSeconds, remainingMs = null) => socket.receive('state', {
+      ...state, phase, timer: { limitSeconds, remainingMs, deadlineAt: remainingMs === null ? null : 60000 }
+    });
+
+    receive('準備中', null);
+    assert.equal(display.textContent, '不限時');
+    receive('準備中', 60);
+    assert.equal(display.textContent, '已設定 60 秒，等待開始');
+    client.advance(2000);
+    assert.equal(display.textContent, '已設定 60 秒，等待開始');
+    receive('搶答中', 60, 60000);
+    assert.equal(display.textContent, '01:00');
+    client.advance(50000);
+    assert.equal(display.textContent, '00:10');
+    assert.equal(display.classList.contains('urgent'), true);
+    receive('題目已關閉', 60, 10000);
+    assert.equal(display.textContent, '題目已關閉');
+    assert.equal(display.classList.contains('urgent'), false);
+    receive('已結束', 60, 0);
+    assert.equal(display.textContent, '已結束');
+    receive('搶答中', null);
+    assert.equal(display.textContent, '不限時');
+    receive('已結束', null);
+    assert.equal(display.textContent, '已結束');
+  }
+});
+
 test('自訂 10 秒可直接開始，倒數不因同輪推送延長', async () => {
   const client = bootClient();
   await flushInitialization();
@@ -115,7 +151,7 @@ test('自訂 10 秒可直接開始，倒數不因同輪推送延長', async () =
   assert.equal(display.textContent, '00:08');
   socket.receive('state', { ...live, phase: '題目已關閉', timer: { ...live.timer, remainingMs: 8000 } });
   client.advance(3000);
-  assert.equal(display.textContent, '00:08');
+  assert.equal(display.textContent, '題目已關閉');
   await client.elements.get('start').handlers.click();
   assert.deepEqual(calls[1], ['/api/phase/next', {}]);
   socket.receive('state', { ...live, timer: { deadlineAt: 16000, remainingMs: 10000 } });

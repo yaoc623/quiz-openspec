@@ -301,16 +301,19 @@ document.addEventListener('keydown', (event) => {
 
 function renderTimer() {
   const display = document.querySelector('#timer-display');
-  const running = latestState?.phase === '搶答中';
-  if (timerAnchorRemaining === null || timerAnchorRemaining === undefined) {
-    display.textContent = '不限時';
+  const phase = latestState?.phase;
+  const limit = latestState?.timer?.limitSeconds;
+  if (phase !== '搶答中' || timerAnchorRemaining === null) {
+    if (phase === '題目已關閉' || phase === '已結束') display.textContent = phase;
+    else if (limit == null) display.textContent = '不限時';
+    else display.textContent = phase === '搶答中' ? '等待同步倒數' : `已設定 ${limit} 秒，等待開始`;
     display.classList.remove('urgent');
     return;
   }
-  const remaining = Math.max(0, timerAnchorRemaining - (running ? performance.now() - timerAnchorClientTime : 0));
+  const remaining = Math.max(0, timerAnchorRemaining - (performance.now() - timerAnchorClientTime));
   const seconds = Math.ceil(remaining / 1000);
   display.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-  display.classList.toggle('urgent', running && seconds <= 10);
+  display.classList.toggle('urgent', seconds <= 10);
 }
 
 function renderLeaderboard(rows) {

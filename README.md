@@ -2,13 +2,21 @@
 
 以 Node.js、Express、Socket.IO 和 Google Sheets API 建立的本機課堂搶答系統。活動狀態存於單一服務程序記憶體；重啟服務會清除活動與作答紀錄。
 
-## 安裝
+## Windows 安裝與啟動
 
-需要 Node.js 18 或更新版本。在專案根目錄執行：
+1. 安裝 Node.js LTS（須為 18 或更新版本）及 Git。安裝後重新開啟 PowerShell。
+2. 在檔案總管進入專案資料夾，在網址列輸入 `powershell` 並按 Enter。確認目前資料夾有 `package.json`。
+3. 依序執行下列命令。`npm.cmd` 可直接在 Windows PowerShell 使用。
 
-```sh
-npm install
+```powershell
+node --version
+npm.cmd --version
+npm.cmd ci
+npm.cmd test
+npm.cmd start
 ```
+
+看到啟動訊息後，以瀏覽器開啟 <http://localhost:3000>，並保持 PowerShell 開著。按 Ctrl+C 可停止服務。若出現連接埠占用，先停止先前開啟的同一個服務再啟動。
 
 ## 設定 Google 服務帳號
 
@@ -20,13 +28,7 @@ npm install
 
 若尚未放入憑證，網站仍可啟動；匯入或回寫時會顯示繁體中文錯誤。單元測試使用假資料和 mock API，不需要真實憑證或 Google 連線。
 
-## 啟動
-
-```sh
-npm start
-```
-
-開啟 [http://localhost:3000](http://localhost:3000)。服務只監聽本機 `127.0.0.1:3000`。
+服務預設只監聽本機 `127.0.0.1:3000`。教師與組別採本機選擇身分，適用於同一電腦的示範分頁。
 
 ## 用三個瀏覽器分頁模擬活動
 
@@ -37,10 +39,16 @@ npm start
 
 請不要讓同一組在多個分頁同時操作同一題，因為每組每題只接受第一次提交。
 
+教師也可在開始前套用倒數或公平模式。公平模式將每組提交當下的成功題數乘上設定秒數，再加到伺服器收件時間計算順位。教師可駁回答案、取消駁回、開啟投影逐題揭曉，以及下載 CSV。請先完成審核，再回寫試算表和下載最終 CSV。
+
 ## 測試
 
 ```sh
 npm test
 ```
 
-測試涵蓋表頭與資料位移、單題和題組解析、合併儲存格、Google Sheets mock 讀寫、憑證錯誤、階段轉換、順位及學生答案隔離。
+測試涵蓋表頭與資料位移、單題和題組解析、模擬 Google Sheets 讀寫、草稿、回填競態、加分功能及教師與兩組學生的即時流程。測試會使用本機迴路連線，無須 Google 憑證。實際雲端讀寫須使用具編輯權限的服務帳號。
+
+- [五分鐘展示流程](DEMO_GUIDE.md)
+- [繳交清單](SUBMISSION_CHECKLIST.md)
+- [功能驗收表](ACCEPTANCE_MATRIX.md)

@@ -12,7 +12,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-test('教師與兩組學生完成位移題組，回填期間拒絕重設且失敗可重試', { timeout: 10000 }, async (t) => {
+test('教師與兩組學生串接公平順位、遞補、揭曉、CSV 與位移回填', { timeout: 10000 }, async (t) => {
   const parsed = parseWorksheet({
     title: '位移學習單',
     rows: [[], ['', '', '題號', '題目', '作答'], ['', '', '1', '甲', '(a)'],
@@ -22,7 +22,9 @@ test('教師與兩組學生完成位移題組，回填期間拒絕重設且失�
   const writes = [];
   const started = deferred();
   const pending = deferred();
+  let now = Date.UTC(2026, 10, 20, 8);
   const service = createQuizServer({
+    now: () => now,
     readCredentials: () => ({}),
     importWorksheet: async () => ({ spreadsheetId: 'mock', parsed }),
     createSheetsClient: async () => ({ spreadsheets: { values: {
@@ -64,11 +66,17 @@ test('教師與兩組學生完成位移題組，回填期間拒絕重設且失�
   await Promise.all([teacher, first, second].map((socket) => once(socket, 'state')));
   assert.equal((await post('/api/worksheet/import', {}, false)).status, 403);
   assert.equal((await post('/api/worksheet/import')).status, 200);
+  assert.equal((await post('/api/timer', { limitSeconds: 30 })).status, 200);
+  assert.equal((await post('/api/fair-mode', { enabled: true, delaySeconds: 3 })).status, 200);
   assert.equal((await post('/api/phase/start')).status, 200);
   const submit = (socket, questionNumber, answers) => socket.emitWithAck('answer:submit', { questionNumber, answers });
   assert.equal((await submit(first, '1', ['甲', '  '])).ok, false);
   assert.equal((await submit(first, '1', ['甲', '乙'])).entry.rank, 1);
+  now += 100;
   assert.equal((await submit(second, '1', ['其他甲', '其他乙'])).entry.rank, 2);
+  now += 100;
+  assert.equal((await submit(first, '2', ['較早送出'])).entry.penaltySeconds, 3);
+  now += 100;
   assert.equal((await submit(second, '2', ['單題'])).entry.rank, 1);
   assert.equal((await post('/api/phase/finish')).status, 200);
   const studentReset = await first.emitWithAck('activity:new', {});
@@ -78,14 +86,38 @@ test('教師與兩組學生完成位移題組，回填期間拒絕重設且失�
   await started.promise;
   assert.equal((await post('/api/worksheet/writeback')).status, 409);
   assert.match((await teacher.emitWithAck('activity:new', {})).error, /回填進行中/);
+  assert.equal((await post('/api/submissions/1/reject')).status, 409);
   assert.equal(service.state.phase, '已結束');
   pending.resolve();
   assert.equal((await initialWrite).status, 400);
   assert.equal(service.state.writebackCompleted, false);
+  assert.equal((await post('/api/submissions/1/reject', {}, false)).status, 403);
+  assert.equal((await post('/api/submissions/1/reject')).status, 200);
+  assert.equal((await post('/api/reveal', { index: -1 }, false)).status, 403);
+  const hidden = once(second, 'state');
+  assert.equal((await post('/api/reveal', { index: -1 })).status, 200);
+  const [hiddenState] = await hidden;
+  assert.deepEqual(hiddenState.winners, []);
+  assert.equal(hiddenState.leaderboard, undefined);
+  const firstReveal = once(first, 'state');
+  assert.equal((await post('/api/reveal', { index: 0 })).status, 200);
+  const [firstRevealState] = await firstReveal;
+  assert.deepEqual(firstRevealState.winners.map(({ group, answers }) => [group, answers]), [[2, ['其他甲', '其他乙']]]);
+  const finalReveal = once(second, 'state');
+  assert.equal((await post('/api/reveal', { index: 2 })).status, 200);
+  const [finalState] = await finalReveal;
+  assert.equal(finalState.leaderboard[0].group, 2);
+  assert.equal(finalState.leaderboard[0].score, 2);
+  assert.equal((await fetch(base + '/api/results.csv')).status, 403);
+  const csv = await fetch(base + '/api/results.csv', { headers: { 'x-quiz-role': 'teacher' } });
+  assert.equal(csv.status, 200);
+  const contents = await csv.text();
+  assert.match(contents, /其他甲/);
+  assert.match(contents, /已駁回/);
   assert.equal((await post('/api/worksheet/writeback')).status, 200);
   assert.deepEqual(writes[1].requestBody.data.map(({ range, values }) => [range, values[0][0]]),
     parsed.questions.flatMap((question, i) => question.subquestions.map((part, j) =>
-      [targetA1(part.target), [['甲', '乙'], ['單題']][i][j]])));
+      [targetA1(part.target), [['其他甲', '其他乙'], ['單題']][i][j]])));
   assert.equal((await teacher.emitWithAck('activity:new', {})).ok, true);
   assert.equal(service.state.phase, '準備中');
 });

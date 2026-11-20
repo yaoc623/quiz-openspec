@@ -3,13 +3,14 @@ const express = require('express');
 const http = require('node:http');
 const { Server } = require('socket.io');
 const { QuizState } = require('./quiz-state');
+const { buildQuizCsv } = require('./csv-export');
 const { loadCredentials, importWorksheet, createSheetsClient, writeWinningAnswers } = require('./worksheet-service');
 
 function createQuizServer(options = {}) {
   const app = express();
   const server = http.createServer(app);
   const io = new Server(server);
-  const state = new QuizState();
+  const state = new QuizState({ now: options.now });
   const credentialsPath = options.credentialsPath ?? path.join(process.cwd(), 'credentials.json');
   const readCredentials = options.readCredentials ?? (() => loadCredentials(credentialsPath));
   const worksheetImporter = options.importWorksheet ?? importWorksheet;
@@ -19,6 +20,9 @@ function createQuizServer(options = {}) {
   let serviceAccountEmail = '';
   let writebackInProgress = false;
   const writebackBusyMessage = '回填進行中，請等待完成後再操作。';
+  const scheduleTimeout = options.setTimeout ?? setTimeout;
+  const cancelTimeout = options.clearTimeout ?? clearTimeout;
+  let deadlineTimer = null;
 
   app.use(express.json({ limit: '1mb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -28,6 +32,26 @@ function createQuizServer(options = {}) {
       const role = socket.data.role;
       socket.emit('state', state.publicState(role));
     }
+  }
+
+  function clearDeadlineTimer() {
+    if (deadlineTimer !== null) cancelTimeout(deadlineTimer);
+    deadlineTimer = null;
+  }
+
+  function scheduleDeadline() {
+    clearDeadlineTimer();
+    if (state.phase !== '搶答中' || state.deadlineAt === null) return;
+    const remaining = state.deadlineAt - (options.now?.() ?? Date.now());
+    if (remaining <= 0) {
+      state.finish();
+      sendState();
+      return;
+    }
+    deadlineTimer = scheduleTimeout(() => {
+      deadlineTimer = null;
+      scheduleDeadline();
+    }, remaining);
   }
 
   function asyncRoute(handler) {
@@ -52,7 +76,24 @@ function createQuizServer(options = {}) {
     } catch {
       serviceAccountEmail = '';
     }
-    res.json({ serviceAccountEmail, groupCount: state.groupCount, phase: state.phase });
+    res.json({ serviceAccountEmail, groupCount: state.groupCount, phase: state.phase, timer: state.timerSnapshot() });
+  });
+
+  app.post('/api/timer', requireTeacher, (req, res) => {
+    try {
+      const limit = req.body.limitSeconds === null ? null : Number(req.body.limitSeconds);
+      state.setTimerLimit(limit);
+      sendState();
+      res.json({ timer: state.timerSnapshot() });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/fair-mode', requireTeacher, (req, res) => {
+    try {
+      state.setFairMode(req.body.enabled, Number(req.body.delaySeconds));
+      sendState();
+      res.json({ fairModeEnabled: state.fairModeEnabled, fairDelaySeconds: state.fairDelaySeconds });
+    } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
   app.post('/api/groups', requireTeacher, (req, res) => {
@@ -74,13 +115,50 @@ function createQuizServer(options = {}) {
   }));
 
   app.post('/api/phase/start', requireTeacher, (req, res) => {
-    try { state.start(); sendState(); res.json({ phase: state.phase }); }
+    try { state.start(); scheduleDeadline(); sendState(); res.json({ phase: state.phase, timer: state.timerSnapshot() }); }
     catch (error) { res.status(400).json({ error: error.message }); }
   });
 
   app.post('/api/phase/finish', requireTeacher, (req, res) => {
-    try { state.finish(); sendState(); res.json({ phase: state.phase }); }
+    try { clearDeadlineTimer(); state.finish(); sendState(); res.json({ phase: state.phase }); }
     catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/reveal', requireTeacher, (req, res) => {
+    try {
+      state.setRevealIndex(Number(req.body.index));
+      sendState();
+      res.json({ revealIndex: state.revealIndex });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/submissions/:sequence/reject', requireTeacher, (req, res) => {
+    if (writebackInProgress) return res.status(409).json({ error: writebackBusyMessage });
+    try {
+      const entry = state.reviewSubmission(req.params.sequence, true);
+      sendState();
+      res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/submissions/:sequence/restore', requireTeacher, (req, res) => {
+    if (writebackInProgress) return res.status(409).json({ error: writebackBusyMessage });
+    try {
+      const entry = state.reviewSubmission(req.params.sequence, false);
+      sendState();
+      res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.get('/api/results.csv', requireTeacher, (req, res) => {
+    try {
+      const exported = buildQuizCsv(state, options.now?.() ?? Date.now());
+      res.set({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${exported.filename}"`
+      });
+      res.send(exported.content);
+    } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
   app.post('/api/worksheet/writeback', requireTeacher, asyncRoute(async (_req, res) => {
@@ -114,6 +192,7 @@ function createQuizServer(options = {}) {
         if (socket.data.role !== 'teacher') throw new Error('此操作僅限老師使用。');
         if (writebackInProgress) throw new Error(writebackBusyMessage);
         state.resetActivity();
+        clearDeadlineTimer();
         currentSpreadsheetId = null;
         currentSheetsClient = null;
         sendState();
@@ -125,6 +204,12 @@ function createQuizServer(options = {}) {
     socket.on('answer:submit', (payload, acknowledge = () => {}) => {
       try {
         if (socket.data.role === 'teacher') throw new Error('老師不能提交學生答案。');
+        if (state.phase === '搶答中' && state.deadlineAt !== null && (options.now?.() ?? Date.now()) >= state.deadlineAt) {
+          clearDeadlineTimer();
+          state.finish();
+          sendState();
+          throw new Error('搶答時間已到，活動已結束。');
+        }
         const group = socket.data.role.group;
         const entry = state.submit(group, payload?.questionNumber, payload?.answers);
         acknowledge({ ok: true, entry });

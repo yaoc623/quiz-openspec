@@ -9,13 +9,14 @@
 - 保存同輪未提交草稿，驗證有效答案與角色範圍。
 - 保護進行中的回填，讓回填、結果及活動狀態一致。
 - 沿既有提交鏈整合倒數、計分板、公平模式、教師審核、CSV 與逐題揭曉。
+- 從組員原始提交引入 `reveal-mode` 正式規格及封存紀錄。
 - 提供 Windows 操作、展示及交付文件。
 
 ## Capabilities
 
 ### New Capabilities
 
-- `reveal-mode` 由既有分支帶入逐題揭曉的正式規格。
+本變更的差異規格沿用既有能力。
 
 ### Modified Capabilities
 

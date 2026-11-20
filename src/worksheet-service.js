@@ -71,7 +71,7 @@ async function writeWinningAnswers(sheets, spreadsheetId, questions, submissions
   const data = [];
   for (const question of questions) {
     const winner = submissions
-      .filter((entry) => entry.questionNumber === question.number)
+      .filter((entry) => entry.questionNumber === question.number && !entry.rejected)
       .sort((a, b) => a.rank - b.rank)[0];
     if (!winner) continue;
     question.subquestions.forEach((subquestion, index) => {

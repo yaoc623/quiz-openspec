@@ -1,0 +1,38 @@
+schema: spec-driven
+
+context: |
+  專案：課堂搶答系統（軟體工程期末專題），使用 OpenSpec 流程開發。
+  技術：Node.js、Express、Socket.IO、googleapis；前端使用純 HTML、CSS、JavaScript。
+  資料存於記憶體，僅在本機 localhost:3000 執行。
+  Google 金鑰存於專案根目錄 credentials.json，絕不可寫入程式碼，且必須列入 .gitignore。
+  必須透過 Google Sheets API 直接讀寫雲端試算表，不可下載成 xlsx。
+  不得寫死試算表儲存格位置；所有位置必須由程式掃描試算表算出。
+  每完成一個功能都必須能以 npm start 執行。
+  程式碼註解和介面文字使用繁體中文。
+  修改程式前先說明修改內容；修改後說明測試方式。
+  Language: zh-TW
+  All artifacts must be written in zh-TW.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+skillsScope: project
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

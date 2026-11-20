@@ -67,12 +67,17 @@ test('合併題號與單題答案格使用合併區域左上角', () => {
   assert.equal(parsed.questions[1].subquestions[0].target.column, left + 2);
 });
 
+test('有題目但空白題號未合併時拒絕錯併到上一題', () => {
+  const { rows } = movedSheet({ body: [['1', '題目一', '答案'], [null, '題號遺漏的題目', '答案']] });
+  assert.throws(() => parseWorksheet({ title: '格式錯誤', rows }), /找不到題號或合併題號/);
+});
+
 test('學習單向右及向下移動時題目結構相同且答案索引同步移動', () => {
   const body = [['1', '題目甲', '(a)'], [null, '題目乙', '(b)']];
   const first = movedSheet({ body });
   const second = movedSheet({ top: 6, left: 8, body });
-  const a = parseWorksheet({ title: 'A', rows: first.rows });
-  const b = parseWorksheet({ title: 'B', rows: second.rows });
+  const a = parseWorksheet({ title: 'A', rows: first.rows, merges: [{ startRowIndex: 1, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 1 }] });
+  const b = parseWorksheet({ title: 'B', rows: second.rows, merges: [{ startRowIndex: 7, endRowIndex: 9, startColumnIndex: 8, endColumnIndex: 9 }] });
   assert.deepEqual(a.questions.map(({ number, subquestions }) => [number, subquestions.length]), b.questions.map(({ number, subquestions }) => [number, subquestions.length]));
   assert.equal(b.questions[0].subquestions[0].target.row - a.questions[0].subquestions[0].target.row, 6);
   assert.equal(b.questions[0].subquestions[0].target.column - a.questions[0].subquestions[0].target.column, 8);
@@ -116,7 +121,7 @@ test('拒絕格式錯誤憑證並確認 credentials.json 受 Git 忽略', () => 
 
 test('回寫從解析出的答案目標批次更新單題與題組答案', async () => {
   const { rows, top, left } = movedSheet({ top: 2, left: 5, body: [['1', '甲', '(a)'], [null, '乙', '(b)'], ['2', '丙', '答案']] });
-  const parsed = parseWorksheet({ title: '回寫頁', rows });
+  const parsed = parseWorksheet({ title: '回寫頁', rows, merges: [{ startRowIndex: top + 1, endRowIndex: top + 3, startColumnIndex: left, endColumnIndex: left + 1 }] });
   const ranges = [];
   const mockSheets = { spreadsheets: { values: { batchUpdate: async (payload) => { ranges.push(...payload.requestBody.data); return { data: { totalUpdatedCells: payload.requestBody.data.length } }; } } } };
   const submissions = [

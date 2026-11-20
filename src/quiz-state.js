@@ -8,7 +8,7 @@ class QuizState {
   }
 
   setGroupCount(count) {
-    if (this.phase !== '準備中' || !Number.isInteger(count) || count < 1 || count > 100) throw new Error('組數必須是在準備階段設定的 1 至 100 正整數。');
+    if (this.phase !== '準備中' || !Number.isInteger(count) || count < 1) throw new Error('組數必須是在準備階段設定的正整數。');
     this.groupCount = count;
   }
 

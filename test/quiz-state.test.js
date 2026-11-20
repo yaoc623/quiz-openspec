@@ -21,7 +21,10 @@ test('預設四組並只允許準備階段設定正整數組數', () => {
   assert.equal(state.groupCount, 4);
   state.setGroupCount(6);
   assert.equal(state.groupCount, 6);
+  state.setGroupCount(101);
+  assert.equal(state.groupCount, 101);
   assert.throws(() => state.setGroupCount(0), /正整數/);
+  assert.throws(() => state.setGroupCount(-1), /正整數/);
   assert.throws(() => state.setGroupCount(2.5), /正整數/);
 });
 
@@ -45,6 +48,7 @@ test('只在搶答中接受完整答案並限制同組同題只能提交一次',
   assert.throws(() => state.submit(5, '1', ['a', 'b']), /組別無效/);
   state.submit(1, '1', ['a', 'b']);
   assert.throws(() => state.submit(1, '1', ['c', 'd']), /不能重複/);
+  assert.deepEqual(state.submit(2, '2', ['單題答案']).answers, ['單題答案']);
   state.finish();
   assert.throws(() => state.submit(2, '2', ['x']), /不是搶答階段/);
 });

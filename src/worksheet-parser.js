@@ -36,7 +36,6 @@ function parseWorksheet({ title, rows, merges = [] }) {
   if (!header) return null;
   const questions = [];
   const questionByNumber = new Map();
-  let lastNumber = '';
   for (let row = header.row + 1; row < rows.length; row += 1) {
     const prompt = textAt(rows, row, header.prompt);
     if (!prompt) continue;
@@ -45,9 +44,7 @@ function parseWorksheet({ title, rows, merges = [] }) {
       const numberMerge = mergeForCell(merges, row, header.number);
       if (numberMerge) number = textAt(rows, rangeBounds(numberMerge).startRow, rangeBounds(numberMerge).startColumn);
     }
-    if (number) lastNumber = number;
-    else number = lastNumber;
-    if (!number) continue;
+    if (!number) throw new Error(`第 ${row + 1} 列有題目內容，但找不到題號或合併題號儲存格。`);
 
     const answerLabel = textAt(rows, row, header.answer);
     const groupMatch = answerLabel.match(/[（(]\s*([^）)]+)\s*[）)]/);

@@ -18,14 +18,20 @@ async function request(base, path, body) {
 
 test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回寫', { timeout: 10000 }, async () => {
   const writes = [];
+  let failImport = true;
+  let failWriteback = false;
   const parsed = { sheet: '練習單', questions: [{ number: '1', subquestions: [
     { label: 'a', target: { sheet: '練習單', row: 6, column: 4 } },
     { label: 'b', target: { sheet: '練習單', row: 7, column: 4 } }
   ] }] };
   const service = createQuizServer({
     readCredentials: () => ({ client_email: 'quiz-service@example.test' }),
-    importWorksheet: async () => ({ spreadsheetId: 'mock-sheet-id', parsed, serviceAccountEmail: 'quiz-service@example.test' }),
+    importWorksheet: async () => {
+      if (failImport) throw new Error('permission denied');
+      return { spreadsheetId: 'mock-sheet-id', parsed, serviceAccountEmail: 'quiz-service@example.test' };
+    },
     createSheetsClient: async () => ({ spreadsheets: { values: { batchUpdate: async ({ requestBody }) => {
+      if (failWriteback) throw new Error('permission denied');
       writes.push(...requestBody.data);
       return { data: { totalUpdatedCells: requestBody.data.length } };
     } } } })
@@ -41,9 +47,13 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     assert.equal(info.groupCount, 4);
     assert.equal(info.serviceAccountEmail, 'quiz-service@example.test');
     assert.equal((await request(base, '/api/groups', { groupCount: 2 })).groupCount, 2);
+    const importFailure = await fetch(`${base}/api/worksheet/import`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ url: 'mock-url' }) });
+    assert.equal(importFailure.status, 400);
+    assert.match((await importFailure.json()).error, /試算表操作失敗/);
+    assert.equal(service.state.worksheet, null);
+    failImport = false;
     const imported = await request(base, '/api/worksheet/import', { url: 'https://docs.google.com/spreadsheets/d/fake/edit' });
     assert.equal(imported.questionCount, 1);
-    await request(base, '/api/phase/start', {});
 
     const connect = (role, group) => {
       const client = createClient(base, { auth: { role, group }, transports: ['websocket'] });
@@ -52,10 +62,20 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     };
     const teacher = connect('teacher');
     const teamOne = connect('student', 1);
-    const teamTwo = connect('student', 2);
-    const [teacherInitial, oneInitial, twoInitial] = await Promise.all([nextEvent(teacher, 'state'), nextEvent(teamOne, 'state'), nextEvent(teamTwo, 'state')]);
-    assert.equal(teacherInitial.phase, '搶答中');
+    const [teacherInitial, oneInitial] = await Promise.all([nextEvent(teacher, 'state'), nextEvent(teamOne, 'state')]);
+    assert.equal(teacherInitial.phase, '準備中');
     assert.equal(oneInitial.questions[0].number, '1');
+
+    const teacherStarted = nextEvent(teacher, 'state');
+    const oneStarted = nextEvent(teamOne, 'state');
+    await request(base, '/api/phase/start', {});
+    const [teacherActive, oneActive] = await Promise.all([teacherStarted, oneStarted]);
+    assert.equal(teacherActive.phase, '搶答中');
+    assert.equal(oneActive.phase, '搶答中');
+
+    const teamTwo = connect('student', 2);
+    const twoInitial = await nextEvent(teamTwo, 'state');
+    assert.equal(twoInitial.phase, '搶答中');
     assert.equal(twoInitial.submissions.length, 0);
 
     const teacherUpdate = nextEvent(teacher, 'state');
@@ -87,6 +107,10 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const writeback = await request(base, '/api/worksheet/writeback', {});
     assert.equal(writeback.updatedCells, 2);
     assert.deepEqual(writes.map((item) => item.values[0][0]), ['一甲', '一乙']);
+    failWriteback = true;
+    const writebackFailure = await fetch(`${base}/api/worksheet/writeback`, { method: 'POST', headers: { 'x-quiz-role': 'teacher' } });
+    assert.equal(writebackFailure.status, 400);
+    assert.match((await writebackFailure.json()).error, /試算表操作失敗/);
   } finally {
     clients.forEach((client) => client.close());
     await new Promise((resolve) => service.io.close(resolve));

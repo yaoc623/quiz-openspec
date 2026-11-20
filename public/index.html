@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>課堂搶答系統</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page">
+    <header><p class="eyebrow">課堂即時互動</p><h1>課堂搶答系統</h1><p class="intro">老師主持活動，各組即時提交答案。</p></header>
+    <section class="card" id="entry-card">
+      <h2>加入活動</h2>
+      <label for="role">身分</label>
+      <select id="role"><option value="student">學生組別</option><option value="teacher">老師</option></select>
+      <label for="group">組別</label>
+      <select id="group"></select>
+      <button id="join">進入活動</button>
+    </section>
+    <section class="card hidden" id="activity-card">
+      <div class="status-row"><div><p class="eyebrow">目前階段</p><h2 id="phase">準備中</h2></div><span class="badge" id="identity"></span></div>
+      <div id="teacher-tools" class="hidden">
+        <div class="tool-block"><h3>活動設定</h3><form id="group-form"><label for="group-count">組數（1 至 100）</label><div class="inline"><input id="group-count" type="number" min="1" max="100" value="4"><button class="secondary">更新組數</button></div></form></div>
+        <div class="tool-block"><h3>匯入 Google 學習單</h3><label for="sheet-url">試算表網址</label><div class="inline"><input id="sheet-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/..."><button id="import">掃描匯入</button></div><p id="service-account" class="hint">讀取服務帳號資訊中…</p><p id="import-summary" class="hint"></p></div>
+        <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button></div>
+      </div>
+      <p id="notice" role="status" class="notice"></p>
+      <div id="student-work" class="hidden"></div>
+      <div id="answer-list"></div>
+      <div id="results"></div>
+    </section>
+  </main>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

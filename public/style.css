@@ -1,0 +1,35 @@
+:root { color-scheme: light; font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif; color: #172b4d; background: #f3f6fb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.page { max-width: 900px; margin: 0 auto; padding: 42px 20px 72px; }
+header { margin-bottom: 26px; }
+h1 { font-size: clamp(2rem, 6vw, 3.2rem); margin: 4px 0; letter-spacing: .03em; }
+h2 { margin: 0 0 16px; }
+h3 { margin: 0 0 12px; }
+.intro, .hint { color: #61718d; }
+.eyebrow { font-size: .75rem; letter-spacing: .14em; color: #5474ac; font-weight: 700; margin: 0 0 6px; }
+.card { background: white; border: 1px solid #e1e8f2; border-radius: 18px; padding: 24px; margin: 16px 0; box-shadow: 0 10px 30px #19365c0b; }
+label { display: block; font-size: .9rem; margin: 12px 0 6px; font-weight: 600; }
+input, select { width: 100%; min-height: 44px; padding: 9px 12px; border: 1px solid #cbd6e5; border-radius: 9px; color: inherit; background: white; font: inherit; }
+button { border: 0; border-radius: 9px; background: #2463c7; color: white; font: inherit; font-weight: 700; padding: 11px 16px; cursor: pointer; white-space: nowrap; }
+button:hover { background: #174da5; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+#join { width: 100%; margin-top: 18px; }
+.secondary { background: #eaf0f8; color: #244268; }
+.secondary:hover { background: #dce7f5; }
+.inline { display: flex; gap: 10px; align-items: end; }
+.inline input { flex: 1; }
+.status-row { display: flex; justify-content: space-between; align-items: center; }
+.badge { background: #edf3fc; color: #2459a4; padding: 7px 12px; border-radius: 999px; font-size: .85rem; }
+.tool-block { border-top: 1px solid #e9eef5; padding-top: 18px; margin-top: 18px; }
+.controls { margin: 20px 0; flex-wrap: wrap; }
+.notice { color: #2459a4; min-height: 1.3em; }
+.hint { font-size: .9rem; line-height: 1.55; }
+.hidden { display: none !important; }
+.question, .submission, .result { background: #f6f8fc; border-radius: 12px; padding: 16px; margin: 12px 0; }
+.question h3, .result h3 { margin-bottom: 10px; }
+.question input { margin: 4px 0; }
+.submission { display: grid; grid-template-columns: 100px 1fr; gap: 5px 12px; }
+.submission p { margin: 0; }
+.success { color: #16764a; font-weight: 700; }
+@media (max-width: 600px) { .inline { align-items: stretch; flex-direction: column; } .status-row { align-items: start; } .card { padding: 18px; } }

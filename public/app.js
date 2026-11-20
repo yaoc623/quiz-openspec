@@ -100,6 +100,7 @@ function renderState(value) {
     document.querySelector('#start').disabled = value.phase !== '準備中' || !value.questions.length;
     document.querySelector('#finish').disabled = value.phase !== '搶答中';
     document.querySelector('#writeback').disabled = value.phase !== '已結束';
+    document.querySelector('#download-csv').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#timer-limit').disabled = !canEdit;
     document.querySelector('#custom-seconds').disabled = !canEdit;
@@ -262,6 +263,24 @@ document.querySelector('#import').addEventListener('click', async () => {
 document.querySelector('#start').addEventListener('click', async () => { try { await api('/api/phase/start', { method: 'POST', body: '{}' }); showNotice('搶答已開始。'); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#finish').addEventListener('click', async () => { try { await api('/api/phase/finish', { method: 'POST', body: '{}' }); showNotice('搶答已結束。'); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#writeback').addEventListener('click', async () => { try { const result = await api('/api/worksheet/writeback', { method: 'POST', body: '{}' }); showNotice(result.message); } catch (error) { showNotice(error.message, true); } });
+document.querySelector('#download-csv').addEventListener('click', async () => {
+  try {
+    const response = await fetch('/api/results.csv', { headers: { 'X-Quiz-Role': 'teacher' } });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error || '下載失敗，請稍後再試。');
+    }
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || 'quiz-result.csv';
+    const blobUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(blobUrl);
+    showNotice('CSV 結果已開始下載。');
+  } catch (error) { showNotice(error.message, true); }
+});
 document.querySelector('#new-activity').addEventListener('click', () => {
   if (!window.confirm('確定開始新活動？目前題目、作答與結果將清除，組數設定會保留。')) return;
   socket.emit('activity:new', {}, (reply) => {

@@ -346,3 +346,32 @@ test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP �
     await new Promise((resolve) => service.io.close(resolve));
   }
 });
+
+test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 CSV', { timeout: 10000 }, async () => {
+  let now = Date.parse('2026-11-20T08:34:56.789Z');
+  const service = createQuizServer({ now: () => now });
+  service.state.setGroupCount(2);
+  service.state.setWorksheet({ questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{ label: 'a' }, { label: 'b' }] }] });
+  service.state.start();
+  service.state.submit(1, '1', ['答案,"含引號"']);
+  service.state.submit(2, '2', ['題組甲', '題組乙']);
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  try {
+    const early = await fetch(`${base}/api/results.csv`, { headers: { 'x-quiz-role': 'teacher' } });
+    assert.equal(early.status, 400);
+    service.state.finish();
+    const denied = await fetch(`${base}/api/results.csv`);
+    assert.equal(denied.status, 403);
+    const response = await fetch(`${base}/api/results.csv`, { headers: { 'x-quiz-role': 'teacher' } });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/csv; charset=utf-8/);
+    assert.equal(response.headers.get('content-disposition'), 'attachment; filename="quiz-result-20261120-163456.csv"');
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
+    const content = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
+    assert.match(content, /1,,1,"答案,""含引號"""/);
+    assert.match(content, /1,,2,,,,,未作答,否/);
+    assert.match(content, /2,b,2,題組乙/);
+  } finally { await new Promise((resolve) => service.io.close(resolve)); }
+});

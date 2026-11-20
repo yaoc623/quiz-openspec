@@ -29,16 +29,18 @@ class FakeElement {
   addEventListener(name, callback) { this.handlers[name] = callback; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = [...children]; }
+  click() { this.clicked = true; }
 }
 
 function bootClient() {
-  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode'];
+  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'download-csv', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode'];
   const elements = new Map(ids.map((id) => [id, new FakeElement(id)]));
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
   const groupLabel = new FakeElement('group-label');
   const groupSubmit = new FakeElement('group-submit');
   const sockets = [];
+  const createdElements = [];
   let confirmed = false;
   let confirmationText = '';
   const document = {
@@ -48,12 +50,13 @@ function bootClient() {
       if (selector.startsWith('#')) return elements.get(selector.slice(1));
       throw new Error(`未支援的選擇器：${selector}`);
     },
-    createElement() { return new FakeElement(); }
+    createElement() { const element = new FakeElement(); createdElements.push(element); return element; }
   };
   const context = {
     document,
     window: { confirm(message) { confirmationText = message; return confirmed; } },
     fetch: async () => ({ ok: true, json: async () => ({ groupCount: 4, serviceAccountEmail: '' }) }),
+    URL: { createObjectURL() { return 'blob:csv'; }, revokeObjectURL() {} },
     setInterval: () => 1,
     io: () => {
       const socket = {
@@ -68,7 +71,7 @@ function bootClient() {
     }
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'), context);
-  return { elements, sockets, context, setConfirmed(value) { confirmed = value; }, getConfirmationText() { return confirmationText; } };
+  return { elements, sockets, context, createdElements, setConfirmed(value) { confirmed = value; }, getConfirmationText() { return confirmationText; } };
 }
 
 async function flushInitialization() {
@@ -201,4 +204,30 @@ test('老師作答列可駁回成功答案並取消駁回，學生結果顯示�
   studentClient.sockets[0].receive('state', { phase: '已結束', groupCount: 2, questions: [{ number: '1', subquestions: [] }], submissions: [], winners: [{ questionNumber: '1', group: null, answers: [], noCorrectAnswer: true }], rejectedSubmissions: [{ group: 1, questionNumber: '1', sequence: 1 }], leaderboard: [] });
   assert.match(studentClient.elements.get('results').children[1].children[0].textContent, /無人答對/);
   assert.match(studentClient.elements.get('results').children[2].children[0].textContent, /已駁回/);
+});
+
+test('老師只在活動結束後看見 CSV 下載並以教師角色取得檔案', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('role').value = 'teacher';
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  const button = client.elements.get('download-csv');
+  socket.receive('state', { phase: '搶答中', groupCount: 4, questions: [], submissions: [], timer: { remainingMs: null } });
+  assert.equal(button.classList.contains('hidden'), true);
+  socket.receive('state', { phase: '已結束', groupCount: 4, questions: [], submissions: [], winners: [], timer: { remainingMs: null } });
+  assert.equal(button.classList.contains('hidden'), false);
+
+  let request;
+  client.context.fetch = async (url, options) => {
+    request = { url, options };
+    return { ok: true, headers: { get: () => 'attachment; filename="quiz-result-20261120-163456.csv"' }, blob: async () => ({}) };
+  };
+  await button.handlers.click();
+  assert.equal(request.url, '/api/results.csv');
+  assert.equal(request.options.headers['X-Quiz-Role'], 'teacher');
+  const downloadLink = client.createdElements.find((element) => element.download);
+  assert.equal(downloadLink.download, 'quiz-result-20261120-163456.csv');
+  assert.equal(downloadLink.clicked, true);
+  assert.match(client.elements.get('notice').textContent, /開始下載/);
 });

@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('node:http');
 const { Server } = require('socket.io');
 const { QuizState } = require('./quiz-state');
+const { buildQuizCsv } = require('./csv-export');
 const { loadCredentials, importWorksheet, createSheetsClient, writeWinningAnswers } = require('./worksheet-service');
 
 function createQuizServer(options = {}) {
@@ -134,6 +135,17 @@ function createQuizServer(options = {}) {
       const entry = state.reviewSubmission(req.params.sequence, false);
       sendState();
       res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.get('/api/results.csv', requireTeacher, (req, res) => {
+    try {
+      const exported = buildQuizCsv(state, options.now?.() ?? Date.now());
+      res.set({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${exported.filename}"`
+      });
+      res.send(exported.content);
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
 

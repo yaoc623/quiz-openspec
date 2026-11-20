@@ -313,3 +313,36 @@ test('公平模式設定只限老師，推送明細不洩漏給學生且結果�
     await new Promise((resolve) => service.io.close(resolve));
   }
 });
+
+test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP 操作不能駁回', { timeout: 10000 }, async () => {
+  const service = createQuizServer({ readCredentials: () => ({ client_email: 'quiz@example.test' }) });
+  service.state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] });
+  service.state.start();
+  const first = service.state.submit(1, '1', ['一組答案']);
+  service.state.submit(2, '1', ['二組答案']);
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  const clients = [];
+  const connect = (role, group) => { const client = createClient(base, { auth: { role, group }, transports: ['websocket'] }); clients.push(client); return client; };
+  try {
+    const teacher = connect('teacher');
+    const student = connect('student', 1);
+    await Promise.all([nextEvent(teacher, 'state'), nextEvent(student, 'state')]);
+    const denied = await fetch(`${base}/api/submissions/${first.sequence}/reject`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(denied.status, 403);
+    const teacherUpdate = nextEvent(teacher, 'state');
+    const studentUpdate = nextEvent(student, 'state');
+    await request(base, `/api/submissions/${first.sequence}/reject`, {});
+    const [teacherState, studentState] = await Promise.all([teacherUpdate, studentUpdate]);
+    assert.equal(teacherState.submissions.find((entry) => entry.sequence === first.sequence).rejected, true);
+    assert.equal(teacherState.submissions.find((entry) => entry.group === 2).successful, true);
+    assert.equal(studentState.submissions.length, 1);
+    assert.equal(studentState.submissions[0].rejected, true);
+    const restored = nextEvent(teacher, 'state');
+    await request(base, `/api/submissions/${first.sequence}/restore`, {});
+    assert.equal((await restored).submissions[0].successful, true);
+  } finally {
+    clients.forEach((client) => client.close());
+    await new Promise((resolve) => service.io.close(resolve));
+  }
+});

@@ -120,9 +120,22 @@ function renderState(value) {
       group.textContent = `第 ${entry.group} 組・第 ${entry.questionNumber} 題`;
       const content = document.createElement('p');
       content.textContent = value.fairModeEnabled
-        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rank}${entry.successful ? '（搶答成功）' : ''}`
-        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
+        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`
+        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
       row.append(group, content);
+      if (value.phase === '搶答中' || value.phase === '已結束') {
+        const review = document.createElement('button');
+        review.className = 'secondary';
+        review.textContent = entry.rejected ? '取消駁回' : '駁回';
+        review.disabled = entry.rejected ? false : !entry.successful;
+        review.addEventListener('click', async () => {
+          try {
+            await api(`/api/submissions/${entry.sequence}/${entry.rejected ? 'restore' : 'reject'}`, { method: 'POST', body: '{}' });
+            showNotice(entry.rejected ? '已取消駁回。' : '已駁回，順位已更新。');
+          } catch (error) { showNotice(error.message, true); }
+        });
+        row.append(review);
+      }
       answerList.append(row);
     });
     renderLeaderboard(value.leaderboard);
@@ -165,7 +178,15 @@ function renderState(value) {
         const row = document.createElement('article');
         row.className = 'result';
         const text = document.createElement('p');
-        text.textContent = winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：沒有組別提交答案`;
+        text.textContent = winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`;
+        row.append(text);
+        results.append(row);
+      });
+      (value.rejectedSubmissions ?? []).forEach((entry) => {
+        const row = document.createElement('article');
+        row.className = 'result';
+        const text = document.createElement('p');
+        text.textContent = `第 ${entry.questionNumber} 題：第 ${entry.group} 組答案已駁回`;
         row.append(text);
         results.append(row);
       });

@@ -211,3 +211,38 @@ test('公平模式判定時間相同時依實際時間及伺服器序號穩定�
   assert.equal(state.submissions.find((entry) => entry.group === 2).rank, 1);
   assert.equal(state.submissions.find((entry) => entry.group === 1).rank, 2);
 });
+
+test('老師駁回成功答案會依原順位遞補，取消駁回可恢復且排行榜重算', () => {
+  const state = activeState();
+  const first = state.submit(1, '1', ['一甲', '一乙']);
+  const second = state.submit(2, '1', ['二甲', '二乙']);
+  assert.equal(state.reviewSubmission(first.sequence, true).rejected, true);
+  assert.equal(first.rank, null);
+  assert.equal(second.rank, 1);
+  assert.equal(state.leaderboard().find((row) => row.group === 2).score, 1);
+  assert.equal(state.publicState('teacher').submissions.find((entry) => entry.sequence === first.sequence).successful, false);
+  assert.equal(state.publicState('teacher').submissions.find((entry) => entry.sequence === first.sequence).rejected, true);
+  assert.throws(() => state.reviewSubmission(first.sequence, true), /目前成功答案/);
+  state.reviewSubmission(first.sequence, false);
+  assert.equal(first.rank, 1);
+  assert.equal(second.rank, 2);
+  assert.throws(() => state.reviewSubmission(first.sequence, false), /沒有被駁回/);
+});
+
+test('駁回最後一筆答案後結果標示無人答對，公平模式新權重以遞補結果為準', () => {
+  let now = 1000;
+  const state = new QuizState({ now: () => now });
+  state.setGroupCount(2);
+  state.setFairMode(true, 3);
+  state.setWorksheet(worksheet());
+  state.start();
+  const first = state.submit(1, '1', ['甲', '乙']);
+  state.reviewSubmission(first.sequence, true);
+  assert.equal(state.publicState('teacher').leaderboard[0].score, 0);
+  now += 1000;
+  const second = state.submit(2, '2', ['答案']);
+  assert.equal(second.successfulCountAtSubmission, 0);
+  state.finish();
+  assert.equal(state.publicState({ group: 1 }).winners[0].noCorrectAnswer, true);
+  assert.equal(state.publicState({ group: 1 }).winners[0].group, null);
+});

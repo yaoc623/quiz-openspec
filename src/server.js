@@ -121,6 +121,22 @@ function createQuizServer(options = {}) {
     catch (error) { res.status(400).json({ error: error.message }); }
   });
 
+  app.post('/api/submissions/:sequence/reject', requireTeacher, (req, res) => {
+    try {
+      const entry = state.reviewSubmission(req.params.sequence, true);
+      sendState();
+      res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/submissions/:sequence/restore', requireTeacher, (req, res) => {
+    try {
+      const entry = state.reviewSubmission(req.params.sequence, false);
+      sendState();
+      res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
   app.post('/api/worksheet/writeback', requireTeacher, asyncRoute(async (_req, res) => {
     if (state.phase !== '已結束') throw new Error('活動結束後才能回寫答案。');
     if (!currentSpreadsheetId || !state.worksheet) throw new Error('尚未匯入學習單。');

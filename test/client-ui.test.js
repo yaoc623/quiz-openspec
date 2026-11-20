@@ -179,3 +179,26 @@ test('學生只看到公平模式開啟狀態，結果頁標明模式', async ()
   assert.match(client.elements.get('results').children[0].textContent, /公平模式/);
   assert.match(client.elements.get('fair-mode-status').textContent, /公平模式已開啟/);
 });
+
+test('老師作答列可駁回成功答案並取消駁回，學生結果顯示無人答對', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('role').value = 'teacher';
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  socket.receive('state', { phase: '已結束', groupCount: 2, questions: [{ number: '1', subquestions: [] }], submissions: [
+    { sequence: 1, group: 1, questionNumber: '1', answers: ['答案'], receivedAt: '時間', rank: null, rejected: true, successful: false },
+    { sequence: 2, group: 2, questionNumber: '1', answers: ['候補'], receivedAt: '時間', rank: 1, rejected: false, successful: true }
+  ], winners: [{ questionNumber: '1', group: null, answers: [], noCorrectAnswer: true }], rejectedSubmissions: [{ group: 1, questionNumber: '1', sequence: 1 }], leaderboard: [] });
+  const rejectedRow = client.elements.get('answer-list').children[1];
+  assert.match(rejectedRow.children[1].textContent, /已駁回/);
+  assert.equal(rejectedRow.children[2].textContent, '取消駁回');
+  assert.equal(rejectedRow.children[2].disabled, false);
+
+  const studentClient = bootClient();
+  await flushInitialization();
+  studentClient.elements.get('join').handlers.click();
+  studentClient.sockets[0].receive('state', { phase: '已結束', groupCount: 2, questions: [{ number: '1', subquestions: [] }], submissions: [], winners: [{ questionNumber: '1', group: null, answers: [], noCorrectAnswer: true }], rejectedSubmissions: [{ group: 1, questionNumber: '1', sequence: 1 }], leaderboard: [] });
+  assert.match(studentClient.elements.get('results').children[1].children[0].textContent, /無人答對/);
+  assert.match(studentClient.elements.get('results').children[2].children[0].textContent, /已駁回/);
+});

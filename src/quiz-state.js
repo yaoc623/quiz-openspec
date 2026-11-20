@@ -83,13 +83,13 @@ class QuizState {
     if (!Array.isArray(answers) || answers.length !== question.subquestions.length || answers.some((value) => typeof value !== 'string')) throw new Error('請一次填寫此題所有小題答案。');
     if (this.submissions.some((item) => item.group === group && item.questionNumber === question.number)) throw new Error('本組已提交此題，不能重複提交。');
     const receivedAtMs = this.now();
-    const successfulCount = this.submissions.filter((item) => item.group === group && item.rank === 1).length;
+    const successfulCount = this.submissions.filter((item) => item.group === group && item.rank === 1 && !item.rejected).length;
     const penaltySeconds = this.fairModeEnabled ? successfulCount * this.fairDelaySeconds : 0;
     const judgedAtMs = receivedAtMs + penaltySeconds * 1000;
     const entry = {
       group, questionNumber: question.number, answers: [...answers], receivedAt: new Date(receivedAtMs).toISOString(), receivedAtMs,
       sequence: ++this.sequence, successfulCountAtSubmission: successfulCount, penaltySeconds,
-      judgedAtMs, judgedAt: new Date(judgedAtMs).toISOString()
+      judgedAtMs, judgedAt: new Date(judgedAtMs).toISOString(), rejected: false
     };
     this.submissions.push(entry);
     this.recalculateRanks(question.number);
@@ -98,10 +98,23 @@ class QuizState {
 
   recalculateRanks(questionNumber) {
     const entries = this.submissions.filter((item) => item.questionNumber === questionNumber);
-    entries.sort((a, b) => this.fairModeEnabled
+    const active = entries.filter((entry) => !entry.rejected);
+    active.sort((a, b) => this.fairModeEnabled
       ? a.judgedAtMs - b.judgedAtMs || a.receivedAtMs - b.receivedAtMs || a.sequence - b.sequence
       : a.sequence - b.sequence);
-    entries.forEach((entry, index) => { entry.rank = index + 1; });
+    active.forEach((entry, index) => { entry.rank = index + 1; });
+    entries.filter((entry) => entry.rejected).forEach((entry) => { entry.rank = null; });
+  }
+
+  reviewSubmission(sequence, reject) {
+    if (this.phase !== '搶答中' && this.phase !== '已結束') throw new Error('只有搶答中或已結束的活動可以審核答案。');
+    const entry = this.submissions.find((item) => item.sequence === Number(sequence));
+    if (!entry) throw new Error('找不到這筆作答。');
+    if (reject && (entry.rejected || entry.rank !== 1)) throw new Error('只能駁回目前成功答案。');
+    if (!reject && !entry.rejected) throw new Error('這筆作答沒有被駁回。');
+    entry.rejected = reject;
+    this.recalculateRanks(entry.questionNumber);
+    return entry;
   }
 
   timerSnapshot(now = this.now()) {
@@ -120,7 +133,7 @@ class QuizState {
   leaderboard() {
     const rows = Array.from({ length: this.groupCount }, (_, index) => ({ group: index + 1, score: 0, totalSubmissionTimeMs: 0 }));
     for (const question of this.worksheet?.questions ?? []) {
-      const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1);
+      const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1 && !item.rejected);
       if (winner) rows[winner.group - 1].score += 1;
     }
     for (const entry of this.submissions) {
@@ -133,16 +146,17 @@ class QuizState {
     const base = { groupCount: this.groupCount, phase: this.phase, questions: this.worksheet?.questions.map(({ number, subquestions }) => ({ number, subquestions: subquestions.map((item) => ({ label: item.label })) })) ?? [] };
     base.timer = this.timerSnapshot(now);
     base.fairModeEnabled = this.fairModeEnabled;
-    if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 })), leaderboard: this.leaderboard() };
+    if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 && !entry.rejected })), leaderboard: this.leaderboard() };
     const group = role?.group;
     if (this.phase === '已結束') {
       const winners = this.worksheet?.questions.map((question) => {
-        const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1);
-        return winner ? { questionNumber: question.number, group: winner.group, answers: [...winner.answers] } : { questionNumber: question.number, group: null, answers: [] };
+        const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1 && !item.rejected);
+        return winner ? { questionNumber: question.number, group: winner.group, answers: [...winner.answers] } : { questionNumber: question.number, group: null, answers: [], noCorrectAnswer: this.submissions.some((entry) => entry.questionNumber === question.number && entry.rejected) };
       }) ?? [];
-      return { ...base, winners, leaderboard: this.leaderboard() };
+      const rejectedSubmissions = this.submissions.filter((entry) => entry.rejected).map(({ group: rejectedGroup, questionNumber, sequence }) => ({ group: rejectedGroup, questionNumber, sequence }));
+      return { ...base, winners, rejectedSubmissions, leaderboard: this.leaderboard() };
     }
-    return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt })) };
+    return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt, rejected }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt, rejected })) };
   }
 }
 

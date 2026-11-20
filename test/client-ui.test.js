@@ -10,6 +10,7 @@ class FakeElement {
     this.value = '';
     this.textContent = '';
     this.style = {};
+    this.dataset = {};
     this.disabled = false;
     this.children = [];
     this.handlers = {};
@@ -74,6 +75,26 @@ async function flushInitialization() {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+test('同輪推送保留題組草稿，換輪使用相同題號仍清空', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  const state = { activityId: 'first', phase: '搶答中', groupCount: 4,
+    questions: [{ number: '1', subquestions: [{ label: 'a' }, { label: 'b' }] }], submissions: [] };
+  const inputs = () => client.elements.get('student-work').children[0].children.filter((child) => child.type === 'text');
+  socket.receive('state', state);
+  const [first, second] = inputs();
+  first.value = '甲';
+  first.handlers.input();
+  second.value = '乙';
+  second.handlers.input();
+  socket.receive('state', { ...state });
+  assert.deepEqual(inputs().map((input) => input.value), ['甲', '乙']);
+  socket.receive('state', { ...state, activityId: 'second' });
+  assert.deepEqual(inputs().map((input) => input.value), ['', '']);
+});
 
 test('老師的新活動按鈕只在已結束顯示，確認才送出且新狀態清空畫面', async () => {
   const client = bootClient();

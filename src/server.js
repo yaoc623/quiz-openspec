@@ -17,6 +17,8 @@ function createQuizServer(options = {}) {
   let currentSpreadsheetId = null;
   let currentSheetsClient = null;
   let serviceAccountEmail = '';
+  let writebackInProgress = false;
+  const writebackBusyMessage = '回填進行中，請等待完成後再操作。';
 
   app.use(express.json({ limit: '1mb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -82,19 +84,25 @@ function createQuizServer(options = {}) {
   });
 
   app.post('/api/worksheet/writeback', requireTeacher, asyncRoute(async (_req, res) => {
+    if (writebackInProgress) return res.status(409).json({ error: writebackBusyMessage });
     if (state.phase !== '已結束') throw new Error('活動結束後才能回寫答案。');
     if (!currentSpreadsheetId || !state.worksheet) throw new Error('尚未匯入學習單。');
-    if (!currentSheetsClient) currentSheetsClient = await sheetsClientFactory(readCredentials());
-    const result = await writeWinningAnswers(currentSheetsClient, currentSpreadsheetId, state.worksheet.questions, state.submissions);
-    state.markWritebackCompleted();
-    res.json({ message: `回寫完成，共更新 ${result.updatedCells} 個儲存格。`, ...result });
+    writebackInProgress = true;
+    try {
+      if (!currentSheetsClient) currentSheetsClient = await sheetsClientFactory(readCredentials());
+      const result = await writeWinningAnswers(currentSheetsClient, currentSpreadsheetId, state.worksheet.questions, state.submissions);
+      state.markWritebackCompleted();
+      res.json({ message: `回寫完成，共更新 ${result.updatedCells} 個儲存格。`, ...result });
+    } finally {
+      writebackInProgress = false;
+    }
   }));
 
   io.use((socket, next) => {
     const role = socket.handshake.auth?.role;
     const group = Number(socket.handshake.auth?.group);
     if (role === 'teacher') socket.data.role = 'teacher';
-    else if (role === 'student' && Number.isInteger(group) && group > 0) socket.data.role = { group };
+    else if (role === 'student' && Number.isInteger(group) && group > 0 && group <= state.groupCount) socket.data.role = { group };
     else return next(new Error('請先選擇老師或有效組別。'));
     next();
   });
@@ -104,6 +112,7 @@ function createQuizServer(options = {}) {
     socket.on('activity:new', (_payload, acknowledge = () => {}) => {
       try {
         if (socket.data.role !== 'teacher') throw new Error('此操作僅限老師使用。');
+        if (writebackInProgress) throw new Error(writebackBusyMessage);
         state.resetActivity();
         currentSpreadsheetId = null;
         currentSheetsClient = null;
@@ -117,7 +126,7 @@ function createQuizServer(options = {}) {
       try {
         if (socket.data.role === 'teacher') throw new Error('老師不能提交學生答案。');
         const group = socket.data.role.group;
-        const entry = state.submit(group, String(payload.questionNumber), payload.answers);
+        const entry = state.submit(group, payload?.questionNumber, payload?.answers);
         acknowledge({ ok: true, entry });
         sendState();
       } catch (error) { acknowledge({ ok: false, error: error.message }); }

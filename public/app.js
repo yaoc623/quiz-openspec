@@ -11,6 +11,7 @@ let socket;
 let currentRole;
 let latestState;
 let groupCount = 4;
+const answerDrafts = new Map();
 
 function showNotice(message, error = false) {
   notice.textContent = message;
@@ -46,7 +47,11 @@ async function connect() {
   currentRole = roleSelect.value === 'teacher' ? 'teacher' : { group: Number(groupSelect.value) };
   socket = io({ auth: { role: typeof currentRole === 'string' ? currentRole : 'student', group: typeof currentRole === 'string' ? undefined : currentRole.group } });
   socket.on('connect_error', (error) => showNotice(error.message, true));
-  socket.on('state', (value) => { latestState = value; renderState(value); });
+  socket.on('state', (value) => {
+    if (value.phase !== '搶答中' || value.activityId !== latestState?.activityId) answerDrafts.clear();
+    latestState = value;
+    renderState(value);
+  });
   entryCard.classList.add('hidden');
   activityCard.classList.remove('hidden');
   teacherTools.classList.toggle('hidden', currentRole !== 'teacher');
@@ -66,6 +71,12 @@ function createQuestionCard(question) {
     input.type = 'text';
     input.dataset.answerIndex = String(index);
     input.autocomplete = 'off';
+    input.value = answerDrafts.get(question.number)?.[index] ?? '';
+    input.addEventListener('input', () => {
+      const draft = answerDrafts.get(question.number) ?? [];
+      draft[index] = input.value;
+      answerDrafts.set(question.number, draft);
+    });
     input.disabled = latestState?.phase !== '搶答中';
     card.append(label, input);
   });
@@ -124,6 +135,7 @@ function renderState(value) {
         const card = createQuestionCard(question);
         const saved = ownSubmissions.get(question.number);
         if (saved) {
+          answerDrafts.delete(question.number);
           card.querySelectorAll('input').forEach((input, index) => { input.value = saved.answers[index] ?? ''; input.disabled = true; });
           card.querySelector('button').disabled = true;
           const done = document.createElement('p');

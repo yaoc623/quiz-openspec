@@ -1,5 +1,8 @@
+const { randomUUID } = require('node:crypto');
+
 class QuizState {
   constructor() {
+    this.activityId = randomUUID();
     this.groupCount = 4;
     this.phase = '準備中';
     this.worksheet = null;
@@ -33,6 +36,7 @@ class QuizState {
 
   resetActivity() {
     if (this.phase !== '已結束') throw new Error('只有已結束的活動可以開始新活動。');
+    this.activityId = randomUUID();
     this.phase = '準備中';
     this.worksheet = null;
     this.submissions = [];
@@ -49,7 +53,7 @@ class QuizState {
     if (!Number.isInteger(group) || group < 1 || group > this.groupCount) throw new Error('組別無效。');
     const question = this.worksheet?.questions.find((item) => item.number === String(questionNumber));
     if (!question) throw new Error('題號不存在。');
-    if (!Array.isArray(answers) || answers.length !== question.subquestions.length || answers.some((value) => typeof value !== 'string')) throw new Error('請一次填寫此題所有小題答案。');
+    if (!Array.isArray(answers) || answers.length !== question.subquestions.length || answers.some((value) => typeof value !== 'string' || !value.trim())) throw new Error('請一次填寫此題所有小題答案。');
     if (this.submissions.some((item) => item.group === group && item.questionNumber === question.number)) throw new Error('本組已提交此題，不能重複提交。');
     const entry = { group, questionNumber: question.number, answers: [...answers], receivedAt: new Date().toISOString(), sequence: ++this.sequence };
     entry.rank = this.submissions.filter((item) => item.questionNumber === question.number).length + 1;
@@ -58,7 +62,7 @@ class QuizState {
   }
 
   publicState(role) {
-    const base = { groupCount: this.groupCount, phase: this.phase, questions: this.worksheet?.questions.map(({ number, subquestions }) => ({ number, subquestions: subquestions.map((item) => ({ label: item.label })) })) ?? [] };
+    const base = { activityId: this.activityId, groupCount: this.groupCount, phase: this.phase, questions: this.worksheet?.questions.map(({ number, subquestions }) => ({ number, subquestions: subquestions.map((item) => ({ label: item.label })) })) ?? [] };
     if (role === 'teacher') return { ...base, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 })) };
     const group = role?.group;
     if (this.phase === '已結束') {

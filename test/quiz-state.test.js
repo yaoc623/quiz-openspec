@@ -1,0 +1,86 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { QuizState } = require('../src/quiz-state');
+
+function worksheet() {
+  return { questions: [
+    { number: '1', subquestions: [{}, {}] },
+    { number: '2', subquestions: [{}] }
+  ] };
+}
+
+function activeState() {
+  const state = new QuizState();
+  state.setWorksheet(worksheet());
+  state.start();
+  return state;
+}
+
+test('預設四組並只允許準備階段設定正整數組數', () => {
+  const state = new QuizState();
+  assert.equal(state.groupCount, 4);
+  state.setGroupCount(6);
+  assert.equal(state.groupCount, 6);
+  state.setGroupCount(101);
+  assert.equal(state.groupCount, 101);
+  assert.throws(() => state.setGroupCount(0), /正整數/);
+  assert.throws(() => state.setGroupCount(-1), /正整數/);
+  assert.throws(() => state.setGroupCount(2.5), /正整數/);
+});
+
+test('題目載入後開始、結束及錯誤階段轉換', () => {
+  const state = new QuizState();
+  assert.throws(() => state.start(), /先匯入/);
+  state.setWorksheet(worksheet());
+  state.start();
+  assert.equal(state.phase, '搶答中');
+  state.finish();
+  assert.equal(state.phase, '已結束');
+  assert.throws(() => state.finish(), /不是搶答階段/);
+});
+
+test('只在搶答中接受完整答案並限制同組同題只能提交一次', () => {
+  const state = new QuizState();
+  state.setWorksheet(worksheet());
+  assert.throws(() => state.submit(1, '1', ['a', 'b']), /不是搶答階段/);
+  state.start();
+  assert.throws(() => state.submit(1, '1', ['a']), /所有小題/);
+  assert.throws(() => state.submit(5, '1', ['a', 'b']), /組別無效/);
+  state.submit(1, '1', ['a', 'b']);
+  assert.throws(() => state.submit(1, '1', ['c', 'd']), /不能重複/);
+  assert.deepEqual(state.submit(2, '2', ['單題答案']).answers, ['單題答案']);
+  state.finish();
+  assert.throws(() => state.submit(2, '2', ['x']), /不是搶答階段/);
+});
+
+test('有效提交的伺服器收件順位依序增加，無效提交不影響順位', () => {
+  const state = activeState();
+  assert.throws(() => state.submit(1, '1', ['不完整']), /所有小題/);
+  const first = state.submit(2, '1', ['甲', '乙']);
+  const second = state.submit(1, '1', ['丙', '丁']);
+  assert.deepEqual([first.rank, second.rank], [1, 2]);
+  assert.ok(Date.parse(first.receivedAt));
+  assert.equal(state.publicState('teacher').submissions[0].successful, true);
+});
+
+test('搶答中學生只看自己組別答案，結束後只收到得勝組結果', () => {
+  const state = activeState();
+  state.submit(1, '1', ['秘密甲', '秘密乙']);
+  state.submit(2, '1', ['己組甲', '己組乙']);
+  const student = state.publicState({ group: 2 });
+  assert.deepEqual(student.submissions.map((entry) => entry.answers), [['己組甲', '己組乙']]);
+  assert.equal(JSON.stringify(student).includes('秘密甲'), false);
+  const teacher = state.publicState('teacher');
+  assert.equal(teacher.submissions.length, 2);
+  state.finish();
+  const result = state.publicState({ group: 2 });
+  assert.deepEqual(result.winners[0], { questionNumber: '1', group: 1, answers: ['秘密甲', '秘密乙'] });
+});
+
+test('匯入活動只公開題號與小題標記，不包含題目文字或答案目標', () => {
+  const state = new QuizState();
+  state.setWorksheet({ questions: [{ number: '1', prompt: '不應公開', subquestions: [{ label: 'a', target: { sheet: 'private' } }] }] });
+  const snapshot = JSON.stringify(state.publicState({ group: 1 }));
+  assert.equal(snapshot.includes('不應公開'), false);
+  assert.equal(snapshot.includes('private'), false);
+});

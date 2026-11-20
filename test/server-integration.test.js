@@ -18,6 +18,9 @@ async function request(base, path, body) {
 
 test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回寫', { timeout: 10000 }, async () => {
   const writes = [];
+  const importUrls = [];
+  let sheetsClientCreations = 0;
+  let sheetsWriteCalls = 0;
   let failImport = true;
   let failWriteback = false;
   const parsed = { sheet: '練習單', questions: [{ number: '1', subquestions: [
@@ -26,15 +29,17 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
   ] }] };
   const service = createQuizServer({
     readCredentials: () => ({ client_email: 'quiz-service@example.test' }),
-    importWorksheet: async () => {
+    importWorksheet: async (url) => {
+      importUrls.push(url);
       if (failImport) throw new Error('permission denied');
-      return { spreadsheetId: 'mock-sheet-id', parsed, serviceAccountEmail: 'quiz-service@example.test' };
+      return { spreadsheetId: `mock-sheet-${importUrls.length}`, parsed, serviceAccountEmail: 'quiz-service@example.test' };
     },
-    createSheetsClient: async () => ({ spreadsheets: { values: { batchUpdate: async ({ requestBody }) => {
+    createSheetsClient: async () => { sheetsClientCreations += 1; return { spreadsheets: { values: { batchUpdate: async ({ requestBody }) => {
+      sheetsWriteCalls += 1;
       if (failWriteback) throw new Error('permission denied');
       writes.push(...requestBody.data);
       return { data: { totalUpdatedCells: requestBody.data.length } };
-    } } } })
+    } } } }; }
   });
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
@@ -65,6 +70,10 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const [teacherInitial, oneInitial] = await Promise.all([nextEvent(teacher, 'state'), nextEvent(teamOne, 'state')]);
     assert.equal(teacherInitial.phase, '準備中');
     assert.equal(oneInitial.questions[0].number, '1');
+    const earlyReset = await new Promise((resolve) => teacher.emit('activity:new', {}, resolve));
+    assert.equal(earlyReset.ok, false);
+    assert.match(earlyReset.error, /已結束/);
+    assert.equal(service.state.worksheet, parsed);
 
     const teacherStarted = nextEvent(teacher, 'state');
     const oneStarted = nextEvent(teamOne, 'state');
@@ -111,6 +120,59 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const writebackFailure = await fetch(`${base}/api/worksheet/writeback`, { method: 'POST', headers: { 'x-quiz-role': 'teacher' } });
     assert.equal(writebackFailure.status, 400);
     assert.match((await writebackFailure.json()).error, /試算表操作失敗/);
+    assert.equal(service.state.writebackCompleted, true);
+
+    const stateBeforeUnauthorizedReset = service.state.publicState('teacher');
+    const deniedReset = await new Promise((resolve) => teamOne.emit('activity:new', {}, resolve));
+    assert.deepEqual(deniedReset, { ok: false, error: '此操作僅限老師使用。' });
+    assert.deepEqual(service.state.publicState('teacher'), stateBeforeUnauthorizedReset);
+
+    const clientCreationsBeforeReset = sheetsClientCreations;
+    const writeCallsBeforeReset = sheetsWriteCalls;
+    const teacherReset = nextEvent(teacher, 'state');
+    const oneReset = nextEvent(teamOne, 'state');
+    const twoReset = nextEvent(teamTwo, 'state');
+    const resetReply = await new Promise((resolve) => teacher.emit('activity:new', {}, resolve));
+    assert.deepEqual(resetReply, { ok: true });
+    const [teacherResetState, oneResetState, twoResetState] = await Promise.all([teacherReset, oneReset, twoReset]);
+    for (const resetState of [teacherResetState, oneResetState, twoResetState]) {
+      assert.equal(resetState.phase, '準備中');
+      assert.equal(resetState.groupCount, 2);
+      assert.deepEqual(resetState.questions, []);
+      assert.deepEqual(resetState.submissions, []);
+      assert.equal(JSON.stringify(resetState).includes('一甲'), false);
+    }
+    assert.equal(service.state.worksheet, null);
+    assert.equal(service.state.writebackCompleted, false);
+    assert.equal(sheetsClientCreations, clientCreationsBeforeReset);
+    assert.equal(sheetsWriteCalls, writeCallsBeforeReset);
+
+    const lateStudent = connect('student', 1);
+    const lateStudentState = await nextEvent(lateStudent, 'state');
+    assert.equal(lateStudentState.phase, '準備中');
+    assert.deepEqual(lateStudentState.questions, []);
+
+    const sameSheetUrl = 'https://docs.google.com/spreadsheets/d/fake/edit';
+    await request(base, '/api/worksheet/import', { url: sameSheetUrl });
+    assert.equal(service.state.worksheet, parsed);
+    assert.equal(service.state.groupCount, 2);
+    await request(base, '/api/phase/start', {});
+    await request(base, '/api/phase/finish', {});
+    const teacherSecondReset = nextEvent(teacher, 'state');
+    const secondResetReply = await new Promise((resolve) => teacher.emit('activity:new', {}, resolve));
+    assert.deepEqual(secondResetReply, { ok: true });
+    await teacherSecondReset;
+    const duplicateReset = await new Promise((resolve) => teacher.emit('activity:new', {}, resolve));
+    assert.equal(duplicateReset.ok, false);
+    assert.match(duplicateReset.error, /已結束/);
+
+    const differentSheetUrl = 'https://docs.google.com/spreadsheets/d/another-sheet/edit';
+    await request(base, '/api/worksheet/import', { url: differentSheetUrl });
+    assert.equal(service.state.worksheet, parsed);
+    assert.deepEqual(importUrls.slice(-2), [sameSheetUrl, differentSheetUrl]);
+    assert.equal(service.state.groupCount, 2);
+    await request(base, '/api/phase/start', {});
+    assert.equal(service.state.phase, '搶答中');
   } finally {
     clients.forEach((client) => client.close());
     await new Promise((resolve) => service.io.close(resolve));

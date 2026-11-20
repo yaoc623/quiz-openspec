@@ -19,10 +19,11 @@
     </section>
     <section class="card hidden" id="activity-card">
       <div class="status-row"><div><p class="eyebrow">目前階段</p><h2 id="phase">準備中</h2></div><span class="badge" id="identity"></span></div>
+      <p id="import-status" class="hint">學習單狀態：未匯入</p>
       <div id="teacher-tools" class="hidden">
         <div class="tool-block"><h3>活動設定</h3><form id="group-form"><label for="group-count">組數（正整數）</label><div class="inline"><input id="group-count" type="number" min="1" step="1" value="4"><button class="secondary">更新組數</button></div></form></div>
         <div class="tool-block"><h3>匯入 Google 學習單</h3><label for="sheet-url">試算表網址</label><div class="inline"><input id="sheet-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/..."><button id="import">掃描匯入</button></div><p id="service-account" class="hint">讀取服務帳號資訊中…</p><p id="import-summary" class="hint"></p></div>
-        <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button></div>
+        <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button><button id="new-activity" class="secondary hidden">開始新活動</button></div>
       </div>
       <p id="notice" role="status" class="notice"></p>
       <div id="student-work" class="hidden"></div>

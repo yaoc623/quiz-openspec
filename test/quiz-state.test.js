@@ -84,3 +84,39 @@ test('匯入活動只公開題號與小題標記，不包含題目文字或答�
   assert.equal(snapshot.includes('不應公開'), false);
   assert.equal(snapshot.includes('private'), false);
 });
+
+test('已結束活動重設清除題目作答與回寫狀態並保留組數', () => {
+  const state = new QuizState();
+  state.setGroupCount(7);
+  state.setWorksheet(worksheet());
+  state.start();
+  state.submit(1, '1', ['甲', '乙']);
+  state.finish();
+  state.markWritebackCompleted();
+
+  state.resetActivity();
+
+  assert.equal(state.phase, '準備中');
+  assert.equal(state.groupCount, 7);
+  assert.equal(state.worksheet, null);
+  assert.deepEqual(state.submissions, []);
+  assert.equal(state.sequence, 0);
+  assert.equal(state.writebackCompleted, false);
+  assert.deepEqual(state.publicState('teacher').questions, []);
+  assert.deepEqual(state.publicState('teacher').submissions, []);
+});
+
+test('未結束或重複重設會拒絕且不改變活動狀態', () => {
+  const state = new QuizState();
+  state.setWorksheet(worksheet());
+  const worksheetBefore = state.worksheet;
+  assert.throws(() => state.resetActivity(), /已結束/);
+  state.start();
+  assert.throws(() => state.resetActivity(), /已結束/);
+  assert.equal(state.phase, '搶答中');
+  assert.equal(state.worksheet, worksheetBefore);
+  state.finish();
+  state.resetActivity();
+  assert.throws(() => state.resetActivity(), /已結束/);
+  assert.equal(state.worksheet, null);
+});

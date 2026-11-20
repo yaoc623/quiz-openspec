@@ -87,6 +87,8 @@ function createQuestionCard(question) {
 
 function renderState(value) {
   document.querySelector('#phase').textContent = value.phase;
+  document.querySelector('#import-status').textContent = value.questions.length ? '學習單狀態：已匯入' : '學習單狀態：未匯入';
+  results.replaceChildren();
   if (currentRole === 'teacher') {
     const canEdit = value.phase === '準備中';
     document.querySelector('#group-count').disabled = !canEdit;
@@ -95,6 +97,7 @@ function renderState(value) {
     document.querySelector('#start').disabled = value.phase !== '準備中' || !value.questions.length;
     document.querySelector('#finish').disabled = value.phase !== '搶答中';
     document.querySelector('#writeback').disabled = value.phase !== '已結束';
+    document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
     answerList.replaceChildren();
     const heading = document.createElement('h3');
     heading.textContent = '即時作答紀錄';
@@ -166,6 +169,13 @@ document.querySelector('#import').addEventListener('click', async () => {
 document.querySelector('#start').addEventListener('click', async () => { try { await api('/api/phase/start', { method: 'POST', body: '{}' }); showNotice('搶答已開始。'); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#finish').addEventListener('click', async () => { try { await api('/api/phase/finish', { method: 'POST', body: '{}' }); showNotice('搶答已結束。'); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#writeback').addEventListener('click', async () => { try { const result = await api('/api/worksheet/writeback', { method: 'POST', body: '{}' }); showNotice(result.message); } catch (error) { showNotice(error.message, true); } });
+document.querySelector('#new-activity').addEventListener('click', () => {
+  if (!window.confirm('確定開始新活動？目前題目、作答與結果將清除，組數設定會保留。')) return;
+  socket.emit('activity:new', {}, (reply) => {
+    if (!reply.ok) return showNotice(reply.error, true);
+    showNotice('本輪資料已清除，請匯入新的學習單。');
+  });
+});
 
 async function initialize() {
   const info = await api('/api/info');

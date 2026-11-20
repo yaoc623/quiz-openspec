@@ -35,7 +35,8 @@ class FakeElement {
 
 function bootClient() {
   const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'download-csv', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode', 'open-reveal', 'reveal-stage'];
-  const elements = new Map(ids.map((id) => [id, new FakeElement(id)]));
+  const elements = new Map([...ids, 'per-question'].map((id) => [id, new FakeElement(id)]));
+  elements.get('per-question').checked = false;
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
   const groupLabel = new FakeElement('group-label');
@@ -44,6 +45,8 @@ function bootClient() {
   const createdElements = [];
   let confirmed = false;
   let confirmationText = '';
+  let clock = 0;
+  let timerTick;
   const document = {
     querySelector(selector) {
       if (selector === 'label[for="group"]') return groupLabel;
@@ -59,7 +62,8 @@ function bootClient() {
     window: { confirm(message) { confirmationText = message; return confirmed; } },
     fetch: async () => ({ ok: true, json: async () => ({ groupCount: 4, serviceAccountEmail: '' }) }),
     URL: { createObjectURL() { return 'blob:csv'; }, revokeObjectURL() {} },
-    setInterval: () => 1,
+    performance: { now: () => clock },
+    setInterval(callback) { timerTick = callback; return 1; },
     io: () => {
       const socket = {
         handlers: {},
@@ -73,13 +77,52 @@ function bootClient() {
     }
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'), context);
-  return { elements, sockets, context, createdElements, setConfirmed(value) { confirmed = value; }, getConfirmationText() { return confirmationText; } };
+  return { elements, sockets, context, createdElements, advance(ms) { clock += ms; timerTick(); }, setConfirmed(value) { confirmed = value; }, getConfirmationText() { return confirmationText; } };
 }
 
 async function flushInitialization() {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+test('自訂 10 秒可直接開始，倒數不因同輪推送延長', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  const calls = [];
+  client.context.fetch = async (url, options) => {
+    calls.push([url, JSON.parse(options.body)]);
+    return { ok: true, json: async () => ({}) };
+  };
+  client.elements.get('role').value = 'teacher';
+  await client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  const state = { activityId: 'round', groupCount: 4, questions: [{ number: '1', subquestions: [] }], submissions: [] };
+  socket.receive('state', { ...state, phase: '準備中' });
+  client.elements.get('timer-limit').value = 'custom';
+  client.elements.get('custom-seconds').value = '0';
+  await client.elements.get('start').handlers.click();
+  assert.deepEqual(calls, []);
+  client.elements.get('custom-seconds').value = '10';
+  await client.elements.get('start').handlers.click();
+  assert.deepEqual(calls, [['/api/phase/start', { limitSeconds: 10, perQuestion: false }]]);
+  const live = { ...state, phase: '搶答中', timer: { deadlineAt: 11000, remainingMs: 10000 } };
+  const display = client.elements.get('timer-display');
+  socket.receive('state', live);
+  assert.equal(display.textContent, '00:10');
+  client.advance(2000);
+  assert.equal(display.textContent, '00:08');
+  socket.receive('state', { ...live, timer: { ...live.timer, remainingMs: 9500 } });
+  assert.equal(display.textContent, '00:08');
+  socket.receive('state', { ...live, phase: '題目已關閉', timer: { ...live.timer, remainingMs: 8000 } });
+  client.advance(3000);
+  assert.equal(display.textContent, '00:08');
+  await client.elements.get('start').handlers.click();
+  assert.deepEqual(calls[1], ['/api/phase/next', {}]);
+  socket.receive('state', { ...live, timer: { deadlineAt: 16000, remainingMs: 10000 } });
+  assert.equal(display.textContent, '00:10');
+  client.advance(10000);
+  assert.equal(display.textContent, '00:00');
+});
 
 test('同輪推送保留題組草稿，換輪使用相同題號仍清空', async () => {
   const client = bootClient();

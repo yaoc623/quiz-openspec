@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { io: createClient } = require('socket.io-client');
 const { createQuizServer } = require('../src/server');
+const { once } = require('node:events');
 
 function nextEvent(socket, eventName) {
   return new Promise((resolve) => socket.once(eventName, resolve));
@@ -15,6 +16,105 @@ async function request(base, path, body) {
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   return result;
 }
+
+test('教師和兩組學生同步 10 秒逐題期限，逾時、重連與舊排程互不干擾', { timeout: 10000 }, async (t) => {
+  let now = 1000;
+  const timers = [];
+  const service = createQuizServer({
+    now: () => now,
+    setTimeout(callback, delay) {
+      const timer = { callback, delay, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) { timer.cleared = true; },
+    readCredentials: () => ({}),
+    importWorksheet: async () => ({
+      spreadsheetId: 'mock',
+      parsed: { sheet: '計時驗收', questions: ['1', '2', '3'].map((number) => ({ number, subquestions: [{}] })) }
+    })
+  });
+  service.server.listen(0, '127.0.0.1');
+  await once(service.server, 'listening');
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  const sockets = [];
+  t.after(async () => {
+    sockets.forEach((socket) => socket.close());
+    await service.io.close();
+  });
+  const connect = (role, group) => {
+    const socket = createClient(base, { auth: { role, group }, forceNew: true });
+    sockets.push(socket);
+    return socket;
+  };
+  const teacher = connect('teacher');
+  const first = connect('student', 1);
+  let second = connect('student', 2);
+  await Promise.all(sockets.map((socket) => nextEvent(socket, 'state')));
+  const states = () => Promise.all([teacher, first, second].map((socket) => nextEvent(socket, 'state')));
+  const submit = (socket, questionNumber) => socket.emitWithAck('answer:submit', { questionNumber, answers: ['答案'] });
+  await request(base, '/api/worksheet/import', {});
+  await assert.rejects(request(base, '/api/phase/start', { limitSeconds: 0 }), /正整數/);
+  assert.equal(service.state.phase, '準備中');
+
+  let update = states();
+  await request(base, '/api/phase/start', { limitSeconds: 10, perQuestion: true });
+  const started = await update;
+  for (const snapshot of started) {
+    assert.equal(snapshot.currentQuestionNumber, '1');
+    assert.equal(snapshot.timer.deadlineAt, 11000);
+    assert.equal(snapshot.timer.remainingMs, 10000);
+    assert.equal(snapshot.timer.serverNow, 1000);
+  }
+  assert.equal(timers[0].delay, 10000);
+  assert.match((await submit(second, '2')).error, /未開放/);
+  now = 4300;
+  second.close();
+  second = connect('student', 2);
+  const resumed = await nextEvent(second, 'state');
+  assert.equal(resumed.timer.deadlineAt, 11000);
+  assert.equal(resumed.timer.remainingMs, 6700);
+  now = 10999;
+  update = states();
+  assert.equal((await submit(first, '1')).ok, true);
+  await update;
+  now = 11000;
+  update = states();
+  timers[0].callback();
+  for (const closed of await update) {
+    assert.equal(closed.phase, '題目已關閉');
+    assert.equal(closed.timer.remainingMs, 0);
+  }
+  assert.equal((await submit(second, '1')).ok, false);
+  assert.equal(service.state.submissions.length, 1);
+
+  now = 12000;
+  update = states();
+  await request(base, '/api/phase/next', {});
+  assert.equal((await update)[2].timer.deadlineAt, 22000);
+  now = 14500;
+  update = states();
+  await request(base, '/api/phase/finish', {});
+  assert.equal((await update)[0].timer.remainingMs, 7500);
+  assert.equal(timers[1].cleared, true);
+  now = 16000;
+  assert.equal(service.state.timerSnapshot().remainingMs, 7500);
+  update = states();
+  await request(base, '/api/phase/next', {});
+  assert.equal((await update)[1].timer.remainingMs, 10000);
+  timers[0].callback();
+  timers[1].callback();
+  assert.equal(timers.length, 3);
+  assert.equal(timers[2].cleared, false);
+  assert.equal(service.state.deadlineAt, 26000);
+  assert.match((await submit(second, '2')).error, /未開放/);
+  now = 26000;
+  update = states();
+  assert.match((await submit(second, '3')).error, /時間已到/);
+  assert.equal((await update)[2].phase, '已結束');
+  assert.equal(service.state.submissions.length, 1);
+  assert.equal(timers[2].cleared, true);
+});
 
 test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回寫', { timeout: 10000 }, async () => {
   const writes = [];

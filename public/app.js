@@ -15,6 +15,8 @@ let groupCount = 4;
 const answerDrafts = new Map();
 let timerAnchorRemaining = null;
 let timerAnchorClientTime = 0;
+let timerAnchorDeadline = null;
+let timerAnchorActivity = null;
 let teacherRevealOpen = false;
 
 function showNotice(message, error = false) {
@@ -53,6 +55,16 @@ async function connect() {
   socket.on('connect_error', (error) => showNotice(error.message, true));
   socket.on('state', (value) => {
     if (value.phase !== '搶答中' || value.activityId !== latestState?.activityId) answerDrafts.clear();
+    if (currentRole === 'teacher' && value.phase === '準備中' &&
+      (value.activityId !== latestState?.activityId || !latestState)) {
+      const limit = value.timer?.limitSeconds;
+      const choice = limit == null ? '' : [30, 60, 120, 180].includes(limit) ? String(limit) : 'custom';
+      document.querySelector('#timer-limit').value = choice;
+      const custom = document.querySelector('#custom-seconds');
+      custom.value = choice === 'custom' ? String(limit) : '';
+      custom.classList.toggle('hidden', choice !== 'custom');
+      document.querySelector('#per-question').checked = false;
+    }
     latestState = value;
     renderState(value);
   });
@@ -62,7 +74,7 @@ async function connect() {
   document.querySelector('#identity').textContent = currentRole === 'teacher' ? '老師' : `第 ${currentRole.group} 組`;
 }
 
-function createQuestionCard(question) {
+function createQuestionCard(question, canAnswer) {
   const card = document.createElement('article');
   card.className = 'question';
   const title = document.createElement('h3');
@@ -81,12 +93,12 @@ function createQuestionCard(question) {
       draft[index] = input.value;
       answerDrafts.set(question.number, draft);
     });
-    input.disabled = latestState?.phase !== '搶答中';
+    input.disabled = !canAnswer;
     card.append(label, input);
   });
   const button = document.createElement('button');
   button.textContent = '提交本題答案';
-  button.disabled = latestState?.phase !== '搶答中';
+  button.disabled = !canAnswer;
   button.addEventListener('click', () => {
     const inputs = [...card.querySelectorAll('input')];
     socket.emit('answer:submit', { questionNumber: question.number, answers: inputs.map((input) => input.value) }, (reply) => {
@@ -101,8 +113,18 @@ function createQuestionCard(question) {
 }
 
 function renderState(value) {
-  if (value.timer) { timerAnchorRemaining = value.timer.remainingMs; timerAnchorClientTime = Date.now(); }
-  document.querySelector('#phase').textContent = value.phase;
+  const now = performance.now();
+  const remaining = value.timer?.remainingMs ?? null;
+  const deadline = value.timer?.deadlineAt ?? null;
+  const sameWindow = deadline !== null && deadline === timerAnchorDeadline && value.activityId === timerAnchorActivity;
+  timerAnchorRemaining = value.phase === '搶答中' && sameWindow && timerAnchorRemaining !== null
+    ? Math.min(remaining, Math.max(0, timerAnchorRemaining - (now - timerAnchorClientTime)))
+    : remaining;
+  timerAnchorClientTime = now;
+  timerAnchorDeadline = deadline;
+  timerAnchorActivity = value.activityId;
+  document.querySelector('#phase').textContent = value.currentQuestionNumber && value.phase !== '已結束'
+    ? `第 ${value.currentQuestionNumber} 題｜${value.phase}` : value.phase;
   document.querySelector('#import-status').textContent = value.questions.length ? '學習單狀態：已匯入' : '學習單狀態：未匯入';
   results.replaceChildren();
   if (currentRole === 'teacher') {
@@ -110,8 +132,13 @@ function renderState(value) {
     document.querySelector('#group-count').disabled = !canEdit;
     document.querySelector('#group-form button').disabled = !canEdit;
     document.querySelector('#import').disabled = !canEdit;
-    document.querySelector('#start').disabled = value.phase !== '準備中' || !value.questions.length;
-    document.querySelector('#finish').disabled = value.phase !== '搶答中';
+    const betweenQuestions = value.phase === '題目已關閉';
+    const start = document.querySelector('#start');
+    start.disabled = !betweenQuestions && (!canEdit || !value.questions.length);
+    start.textContent = betweenQuestions ? '開始下一題' : '開始搶答';
+    const finish = document.querySelector('#finish');
+    finish.disabled = value.phase !== '搶答中' && !betweenQuestions;
+    finish.textContent = value.currentQuestionNumber && !betweenQuestions && value.phase === '搶答中' ? '關閉本題' : '結束搶答';
     document.querySelector('#writeback').disabled = value.phase !== '已結束';
     document.querySelector('#download-csv').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
@@ -119,6 +146,7 @@ function renderState(value) {
     document.querySelector('#timer-limit').disabled = !canEdit;
     document.querySelector('#custom-seconds').disabled = !canEdit;
     document.querySelector('#save-timer').disabled = !canEdit;
+    document.querySelector('#per-question').disabled = !canEdit;
     document.querySelector('#fair-mode-enabled').checked = Boolean(value.fairModeEnabled);
     document.querySelector('#fair-delay').value = String(value.fairDelaySeconds ?? 3);
     document.querySelector('#fair-mode-enabled').disabled = !canEdit;
@@ -138,7 +166,7 @@ function renderState(value) {
         ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`
         : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
       row.append(group, content);
-      if (value.phase === '搶答中' || value.phase === '已結束') {
+      if (!canEdit) {
         const review = document.createElement('button');
         review.className = 'secondary';
         review.textContent = entry.rejected ? '取消駁回' : '駁回';
@@ -171,7 +199,8 @@ function renderState(value) {
     if (value.phase !== '已結束') {
       const ownSubmissions = new Map((value.submissions ?? []).map((entry) => [entry.questionNumber, entry]));
       value.questions.forEach((question) => {
-        const card = createQuestionCard(question);
+        const canAnswer = value.phase === '搶答中' && (!value.currentQuestionNumber || value.currentQuestionNumber === question.number);
+        const card = createQuestionCard(question, canAnswer);
         const saved = ownSubmissions.get(question.number);
         if (saved) {
           answerDrafts.delete(question.number);
@@ -278,7 +307,7 @@ function renderTimer() {
     display.classList.remove('urgent');
     return;
   }
-  const remaining = Math.max(0, timerAnchorRemaining - (running ? Date.now() - timerAnchorClientTime : 0));
+  const remaining = Math.max(0, timerAnchorRemaining - (running ? performance.now() - timerAnchorClientTime : 0));
   const seconds = Math.ceil(remaining / 1000);
   display.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
   display.classList.toggle('urgent', running && seconds <= 10);
@@ -308,11 +337,18 @@ document.querySelector('#group-form').addEventListener('submit', async (event) =
 document.querySelector('#timer-limit').addEventListener('change', (event) => {
   document.querySelector('#custom-seconds').classList.toggle('hidden', event.target.value !== 'custom');
 });
-document.querySelector('#save-timer').addEventListener('click', async () => {
+function readTimerLimit() {
   const choice = document.querySelector('#timer-limit').value;
   const seconds = choice === '' ? null : Number(choice === 'custom' ? document.querySelector('#custom-seconds').value : choice);
-  if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) return showNotice('自訂秒數必須是正整數。', true);
-  try { await api('/api/timer', { method: 'POST', body: JSON.stringify({ limitSeconds: seconds }) }); showNotice(seconds === null ? '已設定為不限時。' : `已設定 ${seconds} 秒。`); }
+  if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) throw new Error('自訂秒數必須是正整數。');
+  return seconds;
+}
+document.querySelector('#save-timer').addEventListener('click', async () => {
+  try {
+    const seconds = readTimerLimit();
+    await api('/api/timer', { method: 'POST', body: JSON.stringify({ limitSeconds: seconds }) });
+    showNotice(seconds === null ? '已設定為不限時。' : `已設定 ${seconds} 秒。`);
+  }
   catch (error) { showNotice(error.message, true); }
 });
 document.querySelector('#save-fair-mode').addEventListener('click', async () => {
@@ -332,8 +368,23 @@ document.querySelector('#import').addEventListener('click', async () => {
     showNotice('學習單匯入成功。');
   } catch (error) { showNotice(error.message, true); }
 });
-document.querySelector('#start').addEventListener('click', async () => { try { await api('/api/phase/start', { method: 'POST', body: '{}' }); showNotice('搶答已開始。'); } catch (error) { showNotice(error.message, true); } });
-document.querySelector('#finish').addEventListener('click', async () => { try { await api('/api/phase/finish', { method: 'POST', body: '{}' }); showNotice('搶答已結束。'); } catch (error) { showNotice(error.message, true); } });
+document.querySelector('#start').addEventListener('click', async () => {
+  try {
+    const nextQuestion = latestState?.phase === '題目已關閉';
+    const settings = nextQuestion ? {} : {
+      limitSeconds: readTimerLimit(),
+      perQuestion: document.querySelector('#per-question').checked
+    };
+    await api(nextQuestion ? '/api/phase/next' : '/api/phase/start', { method: 'POST', body: JSON.stringify(settings) });
+    showNotice('搶答已開始。');
+  } catch (error) { showNotice(error.message, true); }
+});
+document.querySelector('#finish').addEventListener('click', async () => {
+  try {
+    const result = await api('/api/phase/finish', { method: 'POST', body: '{}' });
+    showNotice(result.phase === '題目已關閉' ? '本題已關閉。' : '搶答已結束。');
+  } catch (error) { showNotice(error.message, true); }
+});
 document.querySelector('#writeback').addEventListener('click', async () => { try { const result = await api('/api/worksheet/writeback', { method: 'POST', body: '{}' }); showNotice(result.message); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#download-csv').addEventListener('click', async () => {
   try {

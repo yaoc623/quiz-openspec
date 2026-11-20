@@ -23,18 +23,22 @@ function createQuizServer(options = {}) {
   const scheduleTimeout = options.setTimeout ?? setTimeout;
   const cancelTimeout = options.clearTimeout ?? clearTimeout;
   let deadlineTimer = null;
+  let deadlineGeneration = 0;
+  const now = options.now ?? Date.now;
 
   app.use(express.json({ limit: '1mb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   function sendState() {
+    const serverNow = now();
     for (const socket of io.sockets.sockets.values()) {
       const role = socket.data.role;
-      socket.emit('state', state.publicState(role));
+      socket.emit('state', state.publicState(role, serverNow));
     }
   }
 
   function clearDeadlineTimer() {
+    deadlineGeneration += 1;
     if (deadlineTimer !== null) cancelTimeout(deadlineTimer);
     deadlineTimer = null;
   }
@@ -42,17 +46,22 @@ function createQuizServer(options = {}) {
   function scheduleDeadline() {
     clearDeadlineTimer();
     if (state.phase !== '搶答中' || state.deadlineAt === null) return;
-    const remaining = state.deadlineAt - (options.now?.() ?? Date.now());
+    const serverNow = now();
+    const remaining = state.deadlineAt - serverNow;
     if (remaining <= 0) {
-      state.finish();
+      state.finish(serverNow);
       sendState();
       return;
     }
+    const generation = deadlineGeneration;
     deadlineTimer = scheduleTimeout(() => {
+      if (generation !== deadlineGeneration) return;
       deadlineTimer = null;
       scheduleDeadline();
-    }, remaining);
+    }, Math.min(remaining, 2_147_483_647));
   }
+
+  server.on('close', clearDeadlineTimer);
 
   function asyncRoute(handler) {
     return (req, res) => Promise.resolve(handler(req, res)).catch((error) => {
@@ -81,8 +90,7 @@ function createQuizServer(options = {}) {
 
   app.post('/api/timer', requireTeacher, (req, res) => {
     try {
-      const limit = req.body.limitSeconds === null ? null : Number(req.body.limitSeconds);
-      state.setTimerLimit(limit);
+      state.setTimerLimit(req.body.limitSeconds);
       sendState();
       res.json({ timer: state.timerSnapshot() });
     } catch (error) { res.status(400).json({ error: error.message }); }
@@ -115,8 +123,22 @@ function createQuizServer(options = {}) {
   }));
 
   app.post('/api/phase/start', requireTeacher, (req, res) => {
-    try { state.start(); scheduleDeadline(); sendState(); res.json({ phase: state.phase, timer: state.timerSnapshot() }); }
+    try {
+      state.start(req.body);
+      scheduleDeadline();
+      sendState();
+      res.json({ phase: state.phase, timer: state.timerSnapshot() });
+    }
     catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/phase/next', requireTeacher, (_req, res) => {
+    try {
+      state.openNextQuestion();
+      scheduleDeadline();
+      sendState();
+      res.json({ phase: state.phase, timer: state.timerSnapshot() });
+    } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
   app.post('/api/phase/finish', requireTeacher, (req, res) => {
@@ -204,14 +226,15 @@ function createQuizServer(options = {}) {
     socket.on('answer:submit', (payload, acknowledge = () => {}) => {
       try {
         if (socket.data.role === 'teacher') throw new Error('老師不能提交學生答案。');
-        if (state.phase === '搶答中' && state.deadlineAt !== null && (options.now?.() ?? Date.now()) >= state.deadlineAt) {
+        const receivedAt = now();
+        if (state.isExpired(receivedAt)) {
           clearDeadlineTimer();
-          state.finish();
+          state.finish(receivedAt);
           sendState();
-          throw new Error('搶答時間已到，活動已結束。');
+          throw new Error('搶答時間已到，無法提交答案。');
         }
         const group = socket.data.role.group;
-        const entry = state.submit(group, payload?.questionNumber, payload?.answers);
+        const entry = state.submit(group, payload?.questionNumber, payload?.answers, receivedAt);
         acknowledge({ ok: true, entry });
         sendState();
       } catch (error) { acknowledge({ ok: false, error: error.message }); }

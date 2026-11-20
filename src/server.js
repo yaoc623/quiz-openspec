@@ -85,6 +85,14 @@ function createQuizServer(options = {}) {
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
+  app.post('/api/fair-mode', requireTeacher, (req, res) => {
+    try {
+      state.setFairMode(req.body.enabled, Number(req.body.delaySeconds));
+      sendState();
+      res.json({ fairModeEnabled: state.fairModeEnabled, fairDelaySeconds: state.fairDelaySeconds });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
   app.post('/api/groups', requireTeacher, (req, res) => {
     try {
       state.setGroupCount(Number(req.body.groupCount));

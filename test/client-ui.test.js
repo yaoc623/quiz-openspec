@@ -13,7 +13,7 @@ class FakeElement {
     this.disabled = false;
     this.children = [];
     this.handlers = {};
-    const classes = new Set(['new-activity', 'leaderboard', 'custom-seconds'].includes(id) ? ['hidden'] : []);
+    const classes = new Set(['new-activity', 'leaderboard', 'custom-seconds', 'fair-mode-status'].includes(id) ? ['hidden'] : []);
     this.classList = {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -32,7 +32,7 @@ class FakeElement {
 }
 
 function bootClient() {
-  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer'];
+  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode'];
   const elements = new Map(ids.map((id) => [id, new FakeElement(id)]));
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
@@ -151,4 +151,31 @@ test('學生搶答中不顯示即時排行榜，結束後顯示相同最終排�
   socket.receive('state', { phase: '已結束', groupCount: 4, questions: [], submissions: [], winners: [], leaderboard: [{ group: 3, score: 2 }], timer: { remainingMs: null } });
   assert.equal(client.elements.get('leaderboard').classList.contains('hidden'), false);
   assert.match(client.elements.get('leaderboard').children[1].textContent, /第 3 組/);
+});
+
+test('老師可設定公平模式並在搶答列看到計算明細', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('role').value = 'teacher';
+  client.elements.get('join').handlers.click();
+  client.elements.get('fair-mode-enabled').checked = true;
+  client.elements.get('fair-delay').value = '5';
+  await client.elements.get('save-fair-mode').handlers.click();
+  assert.equal(client.elements.get('notice').textContent, '公平模式已開啟，每題延遲 5 秒。');
+  const socket = client.sockets[0];
+  socket.receive('state', { phase: '搶答中', groupCount: 4, questions: [], submissions: [{ group: 1, questionNumber: '1', answers: ['答案'], receivedAt: '實際時間', penaltySeconds: 6, judgedAt: '判定時間', rank: 1, successful: true }], fairModeEnabled: true, fairDelaySeconds: 5, timer: { remainingMs: null } });
+  assert.equal(client.elements.get('fair-mode-enabled').disabled, true);
+  assert.match(client.elements.get('answer-list').children[1].children[1].textContent, /實際時間.*加權 6 秒.*判定時間.*順位 1/);
+});
+
+test('學生只看到公平模式開啟狀態，結果頁標明模式', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  socket.receive('state', { phase: '搶答中', groupCount: 4, questions: [], submissions: [], fairModeEnabled: true, timer: { remainingMs: null } });
+  assert.equal(client.elements.get('fair-mode-status').classList.contains('hidden'), false);
+  socket.receive('state', { phase: '已結束', groupCount: 4, questions: [], submissions: [], winners: [{ questionNumber: '1', group: 1, answers: ['答案'] }], fairModeEnabled: true, timer: { remainingMs: null } });
+  assert.match(client.elements.get('results').children[0].textContent, /公平模式/);
+  assert.match(client.elements.get('fair-mode-status').textContent, /公平模式已開啟/);
 });

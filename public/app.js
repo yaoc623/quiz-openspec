@@ -104,6 +104,11 @@ function renderState(value) {
     document.querySelector('#timer-limit').disabled = !canEdit;
     document.querySelector('#custom-seconds').disabled = !canEdit;
     document.querySelector('#save-timer').disabled = !canEdit;
+    document.querySelector('#fair-mode-enabled').checked = Boolean(value.fairModeEnabled);
+    document.querySelector('#fair-delay').value = String(value.fairDelaySeconds ?? 3);
+    document.querySelector('#fair-mode-enabled').disabled = !canEdit;
+    document.querySelector('#fair-delay').disabled = !canEdit;
+    document.querySelector('#save-fair-mode').disabled = !canEdit;
     answerList.replaceChildren();
     const heading = document.createElement('h3');
     heading.textContent = '即時作答紀錄';
@@ -114,7 +119,9 @@ function renderState(value) {
       const group = document.createElement('strong');
       group.textContent = `第 ${entry.group} 組・第 ${entry.questionNumber} 題`;
       const content = document.createElement('p');
-      content.textContent = `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
+      content.textContent = value.fairModeEnabled
+        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rank}${entry.successful ? '（搶答成功）' : ''}`
+        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
       row.append(group, content);
       answerList.append(row);
     });
@@ -122,7 +129,15 @@ function renderState(value) {
     const summary = document.querySelector('#import-summary');
     if (value.questions.length) summary.textContent = `共 ${value.questions.length} 題；每題小題數：${value.questions.map((question) => `${question.number}題 ${question.subquestions.length}小題`).join('、')}`;
     else summary.textContent = '';
+    if (value.phase === '已結束') {
+      const fairResult = document.createElement('p');
+      fairResult.textContent = value.fairModeEnabled ? '本輪使用公平模式' : '本輪未使用公平模式';
+      results.append(fairResult);
+    }
   } else {
+    const fairStatus = document.querySelector('#fair-mode-status');
+    fairStatus.textContent = '公平模式已開啟';
+    fairStatus.classList.toggle('hidden', !value.fairModeEnabled);
     studentWork.replaceChildren();
     answerList.replaceChildren();
     if (value.phase !== '已結束') {
@@ -144,7 +159,7 @@ function renderState(value) {
     } else {
       studentWork.classList.add('hidden');
       const heading = document.createElement('h3');
-      heading.textContent = '搶答結果';
+      heading.textContent = value.fairModeEnabled ? '搶答結果（公平模式）' : '搶答結果（未使用公平模式）';
       results.replaceChildren(heading);
       (value.winners ?? []).forEach((winner) => {
         const row = document.createElement('article');
@@ -205,6 +220,15 @@ document.querySelector('#save-timer').addEventListener('click', async () => {
   if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) return showNotice('自訂秒數必須是正整數。', true);
   try { await api('/api/timer', { method: 'POST', body: JSON.stringify({ limitSeconds: seconds }) }); showNotice(seconds === null ? '已設定為不限時。' : `已設定 ${seconds} 秒。`); }
   catch (error) { showNotice(error.message, true); }
+});
+document.querySelector('#save-fair-mode').addEventListener('click', async () => {
+  const enabled = document.querySelector('#fair-mode-enabled').checked;
+  const delaySeconds = Number(document.querySelector('#fair-delay').value);
+  if (!Number.isInteger(delaySeconds) || delaySeconds < 1) return showNotice('每題延遲秒數必須是正整數。', true);
+  try {
+    await api('/api/fair-mode', { method: 'POST', body: JSON.stringify({ enabled, delaySeconds }) });
+    showNotice(enabled ? `公平模式已開啟，每題延遲 ${delaySeconds} 秒。` : '公平模式已關閉。');
+  } catch (error) { showNotice(error.message, true); }
 });
 document.querySelector('#import').addEventListener('click', async () => {
   try {

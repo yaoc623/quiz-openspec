@@ -161,3 +161,53 @@ test('排行榜每題計一分並依實際送出總時間及組別排序', () =>
   state.finish();
   assert.deepEqual(state.publicState({ group: 1 }).leaderboard, state.leaderboard());
 });
+
+test('公平模式保存正整數延遲，依送出當下成功題數加權判定', () => {
+  let now = 100000;
+  const state = new QuizState({ now: () => now });
+  state.setGroupCount(2);
+  assert.equal(state.fairModeEnabled, false);
+  assert.equal(state.fairDelaySeconds, 3);
+  assert.throws(() => state.setFairMode(true, 0), /正整數/);
+  assert.throws(() => state.setFairMode('true', 3), /開啟或關閉/);
+  state.setFairMode(true, 3);
+  state.setWorksheet(worksheet());
+  state.start();
+  now += 1000;
+  const first = state.submit(1, '1', ['一甲', '一乙']);
+  now += 1000;
+  state.submit(1, '2', ['一題']);
+  now += 500;
+  const laterButWinner = state.submit(2, '2', ['二題']);
+  assert.equal(first.successfulCountAtSubmission, 0);
+  assert.equal(first.penaltySeconds, 0);
+  assert.equal(laterButWinner.successfulCountAtSubmission, 0);
+  assert.equal(laterButWinner.judgedAtMs, laterButWinner.receivedAtMs);
+  assert.equal(state.submissions.find((item) => item.group === 1 && item.questionNumber === '2').penaltySeconds, 3);
+  assert.equal(state.submissions.find((item) => item.group === 1 && item.questionNumber === '2').rank, 2);
+  assert.equal(laterButWinner.rank, 1);
+  assert.equal(state.publicState('teacher').submissions.find((item) => item.group === 2).successful, true);
+  state.finish();
+  assert.equal(state.publicState({ group: 1 }).fairModeEnabled, true);
+  state.resetActivity();
+  assert.equal(state.fairModeEnabled, false);
+  assert.equal(state.fairDelaySeconds, 3);
+});
+
+test('公平模式判定時間相同時依實際時間及伺服器序號穩定排序，學生不收明細', () => {
+  let now = 1000;
+  const state = new QuizState({ now: () => now });
+  state.setFairMode(true, 3);
+  state.setWorksheet(worksheet());
+  state.start();
+  state.submit(2, '1', ['二甲', '二乙']);
+  state.submit(1, '1', ['一甲', '一乙']);
+  const student = state.publicState({ group: 1 });
+  assert.equal(student.fairModeEnabled, true);
+  assert.equal('fairDelaySeconds' in student, false);
+  assert.equal('leaderboard' in student, false);
+  assert.equal('judgedAt' in student.submissions[0], false);
+  assert.equal('penaltySeconds' in student.submissions[0], false);
+  assert.equal(state.submissions.find((entry) => entry.group === 2).rank, 1);
+  assert.equal(state.submissions.find((entry) => entry.group === 1).rank, 2);
+});

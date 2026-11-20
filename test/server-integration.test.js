@@ -250,3 +250,66 @@ test('老師提前結束計時活動會取消期限排程且不會重複結束',
     await new Promise((resolve) => service.io.close(resolve));
   }
 });
+
+test('公平模式設定只限老師，推送明細不洩漏給學生且結果標示模式', { timeout: 10000 }, async () => {
+  const service = createQuizServer({ readCredentials: () => ({ client_email: 'quiz@example.test' }) });
+  service.state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{}] }] });
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  const clients = [];
+  const connect = (role, group) => { const client = createClient(base, { auth: { role, group }, transports: ['websocket'] }); clients.push(client); return client; };
+  try {
+    const teacher = connect('teacher');
+    const studentOne = connect('student', 1);
+    const studentTwo = connect('student', 2);
+    const [initialTeacher, initialOne, initialTwo] = await Promise.all([nextEvent(teacher, 'state'), nextEvent(studentOne, 'state'), nextEvent(studentTwo, 'state')]);
+    assert.equal(initialTeacher.fairModeEnabled, false);
+    assert.equal(initialTeacher.fairDelaySeconds, 3);
+    assert.equal('fairDelaySeconds' in initialOne, false);
+    const denied = await fetch(`${base}/api/fair-mode`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, delaySeconds: 3 }) });
+    assert.equal(denied.status, 403);
+    const invalid = await fetch(`${base}/api/fair-mode`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ enabled: true, delaySeconds: 0 }) });
+    assert.equal(invalid.status, 400);
+
+    const teacherConfigured = nextEvent(teacher, 'state');
+    const oneConfigured = nextEvent(studentOne, 'state');
+    const twoConfigured = nextEvent(studentTwo, 'state');
+    await request(base, '/api/fair-mode', { enabled: true, delaySeconds: 3 });
+    const [configuredTeacher, configuredOne, configuredTwo] = await Promise.all([teacherConfigured, oneConfigured, twoConfigured]);
+    assert.equal(configuredTeacher.fairModeEnabled, true);
+    assert.equal(configuredOne.fairModeEnabled, true);
+    assert.equal(configuredTwo.fairModeEnabled, true);
+
+    const teacherStarted = nextEvent(teacher, 'state');
+    const oneStarted = nextEvent(studentOne, 'state');
+    await request(base, '/api/phase/start', {});
+    await Promise.all([teacherStarted, oneStarted]);
+    let teacherSubmission = nextEvent(teacher, 'state');
+    let oneSubmission = nextEvent(studentOne, 'state');
+    let twoSubmission = nextEvent(studentTwo, 'state');
+    const accepted = await new Promise((resolve) => studentOne.emit('answer:submit', { questionNumber: '1', answers: ['甲'] }, resolve));
+    assert.equal(accepted.ok, true);
+    const [teacherState, oneState, twoState] = await Promise.all([teacherSubmission, oneSubmission, twoSubmission]);
+    const detail = teacherState.submissions[0];
+    assert.equal(detail.successfulCountAtSubmission, 0);
+    assert.equal(detail.penaltySeconds, 0);
+    assert.ok(detail.judgedAt);
+    assert.equal(oneState.submissions.length, 1);
+    assert.equal('judgedAt' in oneState.submissions[0], false);
+    assert.equal('penaltySeconds' in oneState.submissions[0], false);
+    assert.equal(twoState.submissions.length, 0);
+    assert.equal(JSON.stringify(twoState).includes('甲'), false);
+
+    const teacherFinished = nextEvent(teacher, 'state');
+    const oneFinished = nextEvent(studentOne, 'state');
+    await request(base, '/api/phase/finish', {});
+    const [finalTeacher, finalStudent] = await Promise.all([teacherFinished, oneFinished]);
+    assert.equal(finalTeacher.fairModeEnabled, true);
+    assert.equal(finalStudent.fairModeEnabled, true);
+    assert.deepEqual(finalStudent.winners[0].answers, ['甲']);
+    assert.equal('submissions' in finalStudent, false);
+  } finally {
+    clients.forEach((client) => client.close());
+    await new Promise((resolve) => service.io.close(resolve));
+  }
+});

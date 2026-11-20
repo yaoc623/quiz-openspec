@@ -11,6 +11,8 @@ class QuizState {
     this.roundStartedAt = null;
     this.deadlineAt = null;
     this.finishedAt = null;
+    this.fairModeEnabled = false;
+    this.fairDelaySeconds = 3;
   }
 
   setGroupCount(count) {
@@ -30,6 +32,14 @@ class QuizState {
     if (this.phase !== '準備中') throw new Error('只有準備階段可以設定搶答時間。');
     if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) throw new Error('秒數必須是正整數，或選擇不限時。');
     this.timerLimitSeconds = seconds;
+  }
+
+  setFairMode(enabled, delaySeconds = this.fairDelaySeconds) {
+    if (this.phase !== '準備中') throw new Error('只有準備階段可以設定公平模式。');
+    if (typeof enabled !== 'boolean') throw new Error('公平模式必須選擇開啟或關閉。');
+    if (!Number.isInteger(delaySeconds) || delaySeconds < 1) throw new Error('每題延遲秒數必須是正整數。');
+    this.fairModeEnabled = enabled;
+    this.fairDelaySeconds = delaySeconds;
   }
 
   start() {
@@ -57,6 +67,8 @@ class QuizState {
     this.roundStartedAt = null;
     this.deadlineAt = null;
     this.finishedAt = null;
+    this.fairModeEnabled = false;
+    this.fairDelaySeconds = 3;
   }
 
   markWritebackCompleted() {
@@ -71,10 +83,25 @@ class QuizState {
     if (!Array.isArray(answers) || answers.length !== question.subquestions.length || answers.some((value) => typeof value !== 'string')) throw new Error('請一次填寫此題所有小題答案。');
     if (this.submissions.some((item) => item.group === group && item.questionNumber === question.number)) throw new Error('本組已提交此題，不能重複提交。');
     const receivedAtMs = this.now();
-    const entry = { group, questionNumber: question.number, answers: [...answers], receivedAt: new Date(receivedAtMs).toISOString(), receivedAtMs, sequence: ++this.sequence };
-    entry.rank = this.submissions.filter((item) => item.questionNumber === question.number).length + 1;
+    const successfulCount = this.submissions.filter((item) => item.group === group && item.rank === 1).length;
+    const penaltySeconds = this.fairModeEnabled ? successfulCount * this.fairDelaySeconds : 0;
+    const judgedAtMs = receivedAtMs + penaltySeconds * 1000;
+    const entry = {
+      group, questionNumber: question.number, answers: [...answers], receivedAt: new Date(receivedAtMs).toISOString(), receivedAtMs,
+      sequence: ++this.sequence, successfulCountAtSubmission: successfulCount, penaltySeconds,
+      judgedAtMs, judgedAt: new Date(judgedAtMs).toISOString()
+    };
     this.submissions.push(entry);
+    this.recalculateRanks(question.number);
     return entry;
+  }
+
+  recalculateRanks(questionNumber) {
+    const entries = this.submissions.filter((item) => item.questionNumber === questionNumber);
+    entries.sort((a, b) => this.fairModeEnabled
+      ? a.judgedAtMs - b.judgedAtMs || a.receivedAtMs - b.receivedAtMs || a.sequence - b.sequence
+      : a.sequence - b.sequence);
+    entries.forEach((entry, index) => { entry.rank = index + 1; });
   }
 
   timerSnapshot(now = this.now()) {
@@ -105,7 +132,8 @@ class QuizState {
   publicState(role, now = this.now()) {
     const base = { groupCount: this.groupCount, phase: this.phase, questions: this.worksheet?.questions.map(({ number, subquestions }) => ({ number, subquestions: subquestions.map((item) => ({ label: item.label })) })) ?? [] };
     base.timer = this.timerSnapshot(now);
-    if (role === 'teacher') return { ...base, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 })), leaderboard: this.leaderboard() };
+    base.fairModeEnabled = this.fairModeEnabled;
+    if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 })), leaderboard: this.leaderboard() };
     const group = role?.group;
     if (this.phase === '已結束') {
       const winners = this.worksheet?.questions.map((question) => {
@@ -114,7 +142,7 @@ class QuizState {
       }) ?? [];
       return { ...base, winners, leaderboard: this.leaderboard() };
     }
-    return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map((entry) => ({ ...entry })) };
+    return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt })) };
   }
 }
 

@@ -36,4 +36,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 #timer-display { font-size: 2rem; font-variant-numeric: tabular-nums; }
 #timer-display.urgent { color: #c62828; }
 #leaderboard p { margin: 6px 0; font-weight: 700; }
+label:has(#fair-mode-enabled) { display: flex; align-items: center; gap: 8px; }
+#fair-mode-enabled { width: auto; min-height: auto; }
 @media (max-width: 600px) { .inline { align-items: stretch; flex-direction: column; } .status-row { align-items: start; } .card { padding: 18px; } }

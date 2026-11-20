@@ -86,6 +86,7 @@ function createQuizServer(options = {}) {
     if (!currentSpreadsheetId || !state.worksheet) throw new Error('尚未匯入學習單。');
     if (!currentSheetsClient) currentSheetsClient = await sheetsClientFactory(readCredentials());
     const result = await writeWinningAnswers(currentSheetsClient, currentSpreadsheetId, state.worksheet.questions, state.submissions);
+    state.markWritebackCompleted();
     res.json({ message: `回寫完成，共更新 ${result.updatedCells} 個儲存格。`, ...result });
   }));
 
@@ -100,6 +101,18 @@ function createQuizServer(options = {}) {
 
   io.on('connection', (socket) => {
     socket.emit('state', state.publicState(socket.data.role));
+    socket.on('activity:new', (_payload, acknowledge = () => {}) => {
+      try {
+        if (socket.data.role !== 'teacher') throw new Error('此操作僅限老師使用。');
+        state.resetActivity();
+        currentSpreadsheetId = null;
+        currentSheetsClient = null;
+        sendState();
+        acknowledge({ ok: true });
+      } catch (error) {
+        acknowledge({ ok: false, error: error.message });
+      }
+    });
     socket.on('answer:submit', (payload, acknowledge = () => {}) => {
       try {
         if (socket.data.role === 'teacher') throw new Error('老師不能提交學生答案。');

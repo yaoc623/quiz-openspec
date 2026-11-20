@@ -5,6 +5,7 @@ class QuizState {
     this.worksheet = null;
     this.submissions = [];
     this.sequence = 0;
+    this.writebackCompleted = false;
   }
 
   setGroupCount(count) {
@@ -17,6 +18,7 @@ class QuizState {
     this.worksheet = worksheet;
     this.submissions = [];
     this.sequence = 0;
+    this.writebackCompleted = false;
   }
 
   start() {
@@ -27,6 +29,19 @@ class QuizState {
   finish() {
     if (this.phase !== '搶答中') throw new Error('目前不是搶答階段。');
     this.phase = '已結束';
+  }
+
+  resetActivity() {
+    if (this.phase !== '已結束') throw new Error('只有已結束的活動可以開始新活動。');
+    this.phase = '準備中';
+    this.worksheet = null;
+    this.submissions = [];
+    this.sequence = 0;
+    this.writebackCompleted = false;
+  }
+
+  markWritebackCompleted() {
+    this.writebackCompleted = true;
   }
 
   submit(group, questionNumber, answers) {

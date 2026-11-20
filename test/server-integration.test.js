@@ -125,7 +125,9 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const stateBeforeUnauthorizedReset = service.state.publicState('teacher');
     const deniedReset = await new Promise((resolve) => teamOne.emit('activity:new', {}, resolve));
     assert.deepEqual(deniedReset, { ok: false, error: '此操作僅限老師使用。' });
-    assert.deepEqual(service.state.publicState('teacher'), stateBeforeUnauthorizedReset);
+    const afterUnauthorizedReset = service.state.publicState('teacher');
+    afterUnauthorizedReset.timer.serverNow = stateBeforeUnauthorizedReset.timer.serverNow;
+    assert.deepEqual(afterUnauthorizedReset, stateBeforeUnauthorizedReset);
 
     const clientCreationsBeforeReset = sheetsClientCreations;
     const writeCallsBeforeReset = sheetsWriteCalls;
@@ -175,6 +177,76 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     assert.equal(service.state.phase, '搶答中');
   } finally {
     clients.forEach((client) => client.close());
+    await new Promise((resolve) => service.io.close(resolve));
+  }
+});
+
+test('計時設定由伺服器控時，到期同步結束且重新連線取得正確剩餘時間', { timeout: 10000 }, async () => {
+  let now = 100000;
+  let scheduled;
+  const service = createQuizServer({
+    now: () => now,
+    setTimeout: (callback, delay) => { scheduled = { callback, delay }; return scheduled; },
+    clearTimeout: () => {},
+    readCredentials: () => ({ client_email: 'quiz@example.test' }),
+    importWorksheet: async () => ({ spreadsheetId: 'timer-sheet', parsed: { sheet: '練習單', questions: [{ number: '1', subquestions: [{}] }] }, serviceAccountEmail: 'quiz@example.test' })
+  });
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${service.server.address().port}`;
+  const clients = [];
+  const connect = (role, group) => { const client = createClient(base, { auth: { role, group }, transports: ['websocket'] }); clients.push(client); return client; };
+  try {
+    const teacher = connect('teacher');
+    await nextEvent(teacher, 'state');
+    const denied = await fetch(`${base}/api/timer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limitSeconds: 30 }) });
+    assert.equal(denied.status, 403);
+    await request(base, '/api/worksheet/import', { url: 'mock-url' });
+    const bad = await fetch(`${base}/api/timer`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ limitSeconds: 0 }) });
+    assert.equal(bad.status, 400);
+    await request(base, '/api/timer', { limitSeconds: 30 });
+    const beforeStart = service.state.timerSnapshot();
+    assert.equal(beforeStart.limitSeconds, 30);
+    const teacherStarted = nextEvent(teacher, 'state');
+    await request(base, '/api/phase/start', {});
+    const live = await teacherStarted;
+    assert.equal(live.timer.remainingMs, 30000);
+    assert.equal(scheduled.delay, 30000);
+    now += 12000;
+    const student = connect('student', 1);
+    const resumed = await nextEvent(student, 'state');
+    assert.equal(resumed.timer.remainingMs, 18000);
+    const teacherEnded = nextEvent(teacher, 'state');
+    now += 18000;
+    scheduled.callback();
+    const ended = await teacherEnded;
+    assert.equal(ended.phase, '已結束');
+    assert.equal(service.state.finishedAt, 130000);
+    const manualFinish = await fetch(`${base}/api/phase/finish`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: '{}' });
+    assert.equal(manualFinish.status, 400);
+  } finally {
+    clients.forEach((client) => client.close());
+    await new Promise((resolve) => service.io.close(resolve));
+  }
+});
+
+test('老師提前結束計時活動會取消期限排程且不會重複結束', { timeout: 10000 }, async () => {
+  let now = 5000;
+  let scheduled;
+  const cleared = [];
+  const service = createQuizServer({ now: () => now, setTimeout: (callback, delay) => (scheduled = { callback, delay }), clearTimeout: (timer) => cleared.push(timer), readCredentials: () => ({ client_email: 'quiz@example.test' }), importWorksheet: async () => ({ spreadsheetId: 'sheet', parsed: { sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] }, serviceAccountEmail: 'quiz@example.test' }) });
+  await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
+  try {
+    await request(`http://127.0.0.1:${service.server.address().port}`, '/api/worksheet/import', { url: 'mock-url' });
+    await request(`http://127.0.0.1:${service.server.address().port}`, '/api/timer', { limitSeconds: 30 });
+    await request(`http://127.0.0.1:${service.server.address().port}`, '/api/phase/start', {});
+    const deadline = scheduled;
+    now += 4000;
+    await request(`http://127.0.0.1:${service.server.address().port}`, '/api/phase/finish', {});
+    assert.deepEqual(cleared, [deadline]);
+    assert.equal(service.state.phase, '已結束');
+    deadline.callback();
+    assert.equal(service.state.phase, '已結束');
+  } finally {
     await new Promise((resolve) => service.io.close(resolve));
   }
 });

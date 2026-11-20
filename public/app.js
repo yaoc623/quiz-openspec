@@ -11,6 +11,8 @@ let socket;
 let currentRole;
 let latestState;
 let groupCount = 4;
+let timerAnchorRemaining = null;
+let timerAnchorClientTime = 0;
 
 function showNotice(message, error = false) {
   notice.textContent = message;
@@ -86,6 +88,7 @@ function createQuestionCard(question) {
 }
 
 function renderState(value) {
+  if (value.timer) { timerAnchorRemaining = value.timer.remainingMs; timerAnchorClientTime = Date.now(); }
   document.querySelector('#phase').textContent = value.phase;
   document.querySelector('#import-status').textContent = value.questions.length ? '學習單狀態：已匯入' : '學習單狀態：未匯入';
   results.replaceChildren();
@@ -98,6 +101,9 @@ function renderState(value) {
     document.querySelector('#finish').disabled = value.phase !== '搶答中';
     document.querySelector('#writeback').disabled = value.phase !== '已結束';
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
+    document.querySelector('#timer-limit').disabled = !canEdit;
+    document.querySelector('#custom-seconds').disabled = !canEdit;
+    document.querySelector('#save-timer').disabled = !canEdit;
     answerList.replaceChildren();
     const heading = document.createElement('h3');
     heading.textContent = '即時作答紀錄';
@@ -112,6 +118,7 @@ function renderState(value) {
       row.append(group, content);
       answerList.append(row);
     });
+    renderLeaderboard(value.leaderboard);
     const summary = document.querySelector('#import-summary');
     if (value.questions.length) summary.textContent = `共 ${value.questions.length} 題；每題小題數：${value.questions.map((question) => `${question.number}題 ${question.subquestions.length}小題`).join('、')}`;
     else summary.textContent = '';
@@ -147,15 +154,56 @@ function renderState(value) {
         row.append(text);
         results.append(row);
       });
+      renderLeaderboard(value.leaderboard);
     }
   }
+  renderTimer();
   updateGroupOptions(value.groupCount || groupCount);
+}
+
+function renderTimer() {
+  const display = document.querySelector('#timer-display');
+  const running = latestState?.phase === '搶答中';
+  if (timerAnchorRemaining === null || timerAnchorRemaining === undefined) {
+    display.textContent = '不限時';
+    display.classList.remove('urgent');
+    return;
+  }
+  const remaining = Math.max(0, timerAnchorRemaining - (running ? Date.now() - timerAnchorClientTime : 0));
+  const seconds = Math.ceil(remaining / 1000);
+  display.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  display.classList.toggle('urgent', running && seconds <= 10);
+}
+
+function renderLeaderboard(rows) {
+  const board = document.querySelector('#leaderboard');
+  board.replaceChildren();
+  board.classList.toggle('hidden', !rows);
+  if (!rows) return;
+  const heading = document.createElement('h3');
+  heading.textContent = '排行榜';
+  board.append(heading);
+  rows.forEach((row, index) => {
+    const item = document.createElement('p');
+    item.textContent = `${index + 1}. 第 ${row.group} 組｜${row.score} 分`;
+    board.append(item);
+  });
 }
 
 document.querySelector('#join').addEventListener('click', connect);
 document.querySelector('#group-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try { const response = await api('/api/groups', { method: 'POST', body: JSON.stringify({ groupCount: Number(document.querySelector('#group-count').value) }) }); updateGroupOptions(response.groupCount); showNotice('組數已更新。'); }
+  catch (error) { showNotice(error.message, true); }
+});
+document.querySelector('#timer-limit').addEventListener('change', (event) => {
+  document.querySelector('#custom-seconds').classList.toggle('hidden', event.target.value !== 'custom');
+});
+document.querySelector('#save-timer').addEventListener('click', async () => {
+  const choice = document.querySelector('#timer-limit').value;
+  const seconds = choice === '' ? null : Number(choice === 'custom' ? document.querySelector('#custom-seconds').value : choice);
+  if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) return showNotice('自訂秒數必須是正整數。', true);
+  try { await api('/api/timer', { method: 'POST', body: JSON.stringify({ limitSeconds: seconds }) }); showNotice(seconds === null ? '已設定為不限時。' : `已設定 ${seconds} 秒。`); }
   catch (error) { showNotice(error.message, true); }
 });
 document.querySelector('#import').addEventListener('click', async () => {
@@ -185,3 +233,4 @@ async function initialize() {
     : '尚未讀取到服務帳號。請確認專案根目錄 credentials.json 格式正確。';
 }
 initialize().catch((error) => showNotice(error.message, true));
+setInterval(renderTimer, 250);

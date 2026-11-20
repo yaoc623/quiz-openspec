@@ -32,4 +32,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .submission { display: grid; grid-template-columns: 100px 1fr; gap: 5px 12px; }
 .submission p { margin: 0; }
 .success { color: #16764a; font-weight: 700; }
+.timer-panel { background: #edf3fc; padding: 14px 18px; border-radius: 12px; margin: 16px 0; }
+#timer-display { font-size: 2rem; font-variant-numeric: tabular-nums; }
+#timer-display.urgent { color: #c62828; }
+#leaderboard p { margin: 6px 0; font-weight: 700; }
 @media (max-width: 600px) { .inline { align-items: stretch; flex-direction: column; } .status-row { align-items: start; } .card { padding: 18px; } }

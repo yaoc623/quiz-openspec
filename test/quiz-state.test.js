@@ -120,3 +120,44 @@ test('未結束或重複重設會拒絕且不改變活動狀態', () => {
   assert.throws(() => state.resetActivity(), /已結束/);
   assert.equal(state.worksheet, null);
 });
+
+test('倒數時間預設不限時，接受正整數並在新活動重設', () => {
+  let now = 1000;
+  const state = new QuizState({ now: () => now });
+  assert.equal(state.timerLimitSeconds, null);
+  assert.equal(state.timerSnapshot().remainingMs, null);
+  for (const invalid of [0, -1, 2.5, '30']) assert.throws(() => state.setTimerLimit(invalid), /正整數/);
+  state.setTimerLimit(30);
+  state.setWorksheet(worksheet());
+  state.start();
+  assert.equal(state.roundStartedAt, 1000);
+  assert.equal(state.deadlineAt, 31000);
+  now = 11000;
+  assert.equal(state.timerSnapshot().remainingMs, 20000);
+  state.finish();
+  state.resetActivity();
+  assert.equal(state.timerLimitSeconds, null);
+  assert.equal(state.deadlineAt, null);
+});
+
+test('排行榜每題計一分並依實際送出總時間及組別排序', () => {
+  let now = 1000;
+  const state = new QuizState({ now: () => now });
+  state.setGroupCount(3);
+  state.setWorksheet(worksheet());
+  state.start();
+  now = 2000; state.submit(2, '1', ['二甲', '二乙']);
+  now = 3000; state.submit(1, '1', ['一甲', '一乙']);
+  now = 5000; state.submit(1, '2', ['一題']);
+  now = 6000; state.submit(3, '2', ['三題']);
+  assert.deepEqual(state.leaderboard(), [
+    { group: 2, score: 1, totalSubmissionTimeMs: 1000 },
+    { group: 1, score: 1, totalSubmissionTimeMs: 6000 },
+    { group: 3, score: 0, totalSubmissionTimeMs: 5000 }
+  ]);
+  const student = state.publicState({ group: 1 });
+  assert.equal('leaderboard' in student, false);
+  assert.ok(state.publicState('teacher').leaderboard);
+  state.finish();
+  assert.deepEqual(state.publicState({ group: 1 }).leaderboard, state.leaderboard());
+});

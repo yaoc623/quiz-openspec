@@ -13,7 +13,7 @@ class FakeElement {
     this.disabled = false;
     this.children = [];
     this.handlers = {};
-    const classes = new Set(id === 'new-activity' ? ['hidden'] : []);
+    const classes = new Set(['new-activity', 'leaderboard', 'custom-seconds'].includes(id) ? ['hidden'] : []);
     this.classList = {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -32,7 +32,7 @@ class FakeElement {
 }
 
 function bootClient() {
-  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url'];
+  const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer'];
   const elements = new Map(ids.map((id) => [id, new FakeElement(id)]));
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
@@ -54,6 +54,7 @@ function bootClient() {
     document,
     window: { confirm(message) { confirmationText = message; return confirmed; } },
     fetch: async () => ({ ok: true, json: async () => ({ groupCount: 4, serviceAccountEmail: '' }) }),
+    setInterval: () => 1,
     io: () => {
       const socket = {
         handlers: {},
@@ -117,4 +118,37 @@ test('學生收到新活動狀態後不再顯示舊結果且不會看到老師�
   assert.equal(client.elements.get('results').children.length, 0);
   assert.equal(client.elements.get('student-work').children.length, 0);
   assert.equal(client.elements.get('student-work').classList.contains('hidden'), false);
+});
+
+test('老師可設定預設或自訂倒數，搶答期間顯示倒數和即時排行榜', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('role').value = 'teacher';
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  socket.receive('state', { phase: '搶答中', groupCount: 4, questions: [], submissions: [], leaderboard: [{ group: 2, score: 1 }], timer: { remainingMs: 9000, serverNow: Date.now() } });
+  assert.match(client.elements.get('timer-display').textContent, /00:09/);
+  assert.equal(client.elements.get('timer-display').classList.contains('urgent'), true);
+  assert.equal(client.elements.get('leaderboard').classList.contains('hidden'), false);
+  assert.match(client.elements.get('leaderboard').children[1].textContent, /第 2 組/);
+
+  client.elements.get('timer-limit').value = 'custom';
+  client.elements.get('timer-limit').handlers.change({ target: { value: 'custom' } });
+  assert.equal(client.elements.get('custom-seconds').classList.contains('hidden'), false);
+  client.elements.get('custom-seconds').value = '0';
+  client.elements.get('save-timer').handlers.click();
+  await flushInitialization();
+  assert.match(client.elements.get('notice').textContent, /正整數/);
+});
+
+test('學生搶答中不顯示即時排行榜，結束後顯示相同最終排行榜', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  client.elements.get('join').handlers.click();
+  const socket = client.sockets[0];
+  socket.receive('state', { phase: '搶答中', groupCount: 4, questions: [], submissions: [], timer: { remainingMs: null } });
+  assert.equal(client.elements.get('leaderboard').classList.contains('hidden'), true);
+  socket.receive('state', { phase: '已結束', groupCount: 4, questions: [], submissions: [], winners: [], leaderboard: [{ group: 3, score: 2 }], timer: { remainingMs: null } });
+  assert.equal(client.elements.get('leaderboard').classList.contains('hidden'), false);
+  assert.match(client.elements.get('leaderboard').children[1].textContent, /第 3 組/);
 });

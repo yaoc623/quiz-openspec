@@ -20,8 +20,9 @@
     <section class="card hidden" id="activity-card">
       <div class="status-row"><div><p class="eyebrow">目前階段</p><h2 id="phase">準備中</h2></div><span class="badge" id="identity"></span></div>
       <p id="import-status" class="hint">學習單狀態：未匯入</p>
+      <div class="timer-panel"><strong id="timer-display">不限時</strong><p id="leaderboard" class="hidden"></p></div>
       <div id="teacher-tools" class="hidden">
-        <div class="tool-block"><h3>活動設定</h3><form id="group-form"><label for="group-count">組數（正整數）</label><div class="inline"><input id="group-count" type="number" min="1" step="1" value="4"><button class="secondary">更新組數</button></div></form></div>
+        <div class="tool-block"><h3>活動設定</h3><form id="group-form"><label for="group-count">組數（正整數）</label><div class="inline"><input id="group-count" type="number" min="1" step="1" value="4"><button class="secondary">更新組數</button></div></form><label for="timer-limit">搶答時間</label><select id="timer-limit"><option value="">不限時</option><option value="30">30 秒</option><option value="60">60 秒</option><option value="120">120 秒</option><option value="180">180 秒</option><option value="custom">自訂秒數</option></select><input id="custom-seconds" class="hidden" type="number" min="1" step="1" placeholder="輸入正整數秒數"><button id="save-timer" class="secondary">套用時間</button></div>
         <div class="tool-block"><h3>匯入 Google 學習單</h3><label for="sheet-url">試算表網址</label><div class="inline"><input id="sheet-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/..."><button id="import">掃描匯入</button></div><p id="service-account" class="hint">讀取服務帳號資訊中…</p><p id="import-summary" class="hint"></p></div>
         <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button><button id="new-activity" class="secondary hidden">開始新活動</button></div>
       </div>

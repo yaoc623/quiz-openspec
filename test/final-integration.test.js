@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
-const { io: connect } = require('socket.io-client');
+const { authenticatedClient: connect, teacherCookie, teacherOptions } = require('../test-support/login');
 const { createQuizServer } = require('../src/server');
 const { parseWorksheet } = require('../src/worksheet-parser');
 const { targetA1 } = require('../src/worksheet-service');
@@ -23,7 +23,7 @@ test('教師與兩組學生串接公平順位、遞補、揭曉、CSV 與位移�
   const started = deferred();
   const pending = deferred();
   let now = Date.UTC(2026, 10, 20, 8);
-  const service = createQuizServer({
+  const service = createQuizServer({ ...teacherOptions,
     now: () => now,
     readCredentials: () => ({}),
     importWorksheet: async () => ({ spreadsheetId: 'mock', parsed }),
@@ -48,9 +48,9 @@ test('教師與兩組學生串接公平順位、遞補、揭曉、CSV 與位移�
     sockets.forEach((socket) => socket.close());
     await service.io.close();
   });
-  const post = (path, body = {}, teacher = true) => fetch(base + path, {
+  const post = async (path, body = {}, teacher = true) => fetch(base + path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(teacher ? { 'x-quiz-role': 'teacher' } : {}) },
+    headers: { 'content-type': 'application/json', ...(teacher ? { cookie: await teacherCookie(base) } : {}) },
     body: JSON.stringify(body)
   });
   const join = (role, group) => {
@@ -71,13 +71,17 @@ test('教師與兩組學生串接公平順位、遞補、揭曉、CSV 與位移�
   assert.equal((await post('/api/phase/start')).status, 200);
   const submit = (socket, questionNumber, answers) => socket.emitWithAck('answer:submit', { questionNumber, answers });
   assert.equal((await submit(first, '1', ['甲', '  '])).ok, false);
-  assert.equal((await submit(first, '1', ['甲', '乙'])).entry.rank, 1);
+  assert.deepEqual(await submit(first, '1', ['甲', '乙']), { ok: true });
+  assert.equal(service.state.submissions.at(-1).rank, 1);
   now += 100;
-  assert.equal((await submit(second, '1', ['其他甲', '其他乙'])).entry.rank, 2);
+  assert.deepEqual(await submit(second, '1', ['其他甲', '其他乙']), { ok: true });
+  assert.equal(service.state.submissions.at(-1).rank, 2);
   now += 100;
-  assert.equal((await submit(first, '2', ['較早送出'])).entry.penaltySeconds, 3);
+  assert.deepEqual(await submit(first, '2', ['較早送出']), { ok: true });
+  assert.equal(service.state.submissions.at(-1).penaltySeconds, 3);
   now += 100;
-  assert.equal((await submit(second, '2', ['單題'])).entry.rank, 1);
+  assert.deepEqual(await submit(second, '2', ['單題']), { ok: true });
+  assert.equal(service.state.submissions.at(-1).rank, 1);
   assert.equal((await post('/api/phase/finish')).status, 200);
   const studentReset = await first.emitWithAck('activity:new', {});
   assert.match(studentReset.error, /僅限老師/);
@@ -109,7 +113,7 @@ test('教師與兩組學生串接公平順位、遞補、揭曉、CSV 與位移�
   assert.equal(finalState.leaderboard[0].group, 2);
   assert.equal(finalState.leaderboard[0].score, 2);
   assert.equal((await fetch(base + '/api/results.csv')).status, 403);
-  const csv = await fetch(base + '/api/results.csv', { headers: { 'x-quiz-role': 'teacher' } });
+  const csv = await fetch(base + '/api/results.csv', { headers: { cookie: await teacherCookie(base) } });
   assert.equal(csv.status, 200);
   const contents = await csv.text();
   assert.match(contents, /其他甲/);

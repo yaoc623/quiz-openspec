@@ -2,6 +2,7 @@ const path = require('node:path');
 const express = require('express');
 const http = require('node:http');
 const { Server } = require('socket.io');
+const { createIdentity } = require('./identity');
 const { QuizState } = require('./quiz-state');
 const { buildQuizCsv } = require('./csv-export');
 const { loadCredentials, importWorksheet, createSheetsClient, writeWinningAnswers } = require('./worksheet-service');
@@ -9,8 +10,11 @@ const { loadCredentials, importWorksheet, createSheetsClient, writeWinningAnswer
 function createQuizServer(options = {}) {
   const app = express();
   const server = http.createServer(app);
-  const io = new Server(server);
+  const sameOrigin = (headers) => !headers.origin || headers.origin === 'http://' + headers.host;
+  const io = new Server(server, { allowRequest: (req, callback) => callback(null, sameOrigin(req.headers)) });
   const state = new QuizState({ now: options.now });
+  const identity = createIdentity(options);
+  let worksheetGeneration = 0;
   const credentialsPath = options.credentialsPath ?? path.join(process.cwd(), 'credentials.json');
   const readCredentials = options.readCredentials ?? (() => loadCredentials(credentialsPath));
   const worksheetImporter = options.importWorksheet ?? importWorksheet;
@@ -29,13 +33,88 @@ function createQuizServer(options = {}) {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
+  function sessionRole(session) {
+    if (!session) return null;
+    if (session.role === 'teacher') return 'teacher';
+    return { studentId: session.studentId, group: identity.groups.get(session.studentId) ?? null };
+  }
+
+  function roster() {
+    return [...identity.groups].map(([studentId, group]) => ({ studentId, group }));
+  }
+
+  function socketState(role, serverNow = now()) {
+    const snapshot = state.publicState(role, serverNow);
+    if (role === 'teacher') snapshot.students = roster();
+    return snapshot;
+  }
+
   function sendState() {
     const serverNow = now();
     for (const socket of io.sockets.sockets.values()) {
-      const role = socket.data.role;
-      socket.emit('state', state.publicState(role, serverNow));
+      const role = sessionRole(identity.get(socket.data.token));
+      if (role) socket.emit('state', socketState(role, serverNow));
+      else socket.disconnect(true);
     }
   }
+
+  function revoke(req) {
+    const token = identity.token(req.headers);
+    identity.revoke(token);
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.data.token === token) socket.disconnect(true);
+    }
+  }
+
+  app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    if (req.method === 'POST' && !sameOrigin(req.headers)) return res.status(403).json({ error: '請從本網站操作。' });
+    next();
+  });
+
+  app.get('/api/session', (req, res) => {
+    res.json({ identity: sessionRole(identity.get(identity.token(req.headers))) });
+  });
+
+  app.post('/api/session/teacher', (req, res) => {
+    if (!identity.verifyTeacher(req.body.username, req.body.password)) {
+      return res.status(401).json({ error: '教師帳號或密碼錯誤，或尚未設定。' });
+    }
+    revoke(req);
+    identity.issue(res, { role: 'teacher' });
+    res.json({ identity: 'teacher' });
+  });
+
+  app.post('/api/session/student', (req, res) => {
+    try {
+      const studentId = identity.parseStudentId(req.body.studentId);
+      let group = identity.groups.get(studentId);
+      const joiningActivity = group === undefined;
+      if (group === undefined) {
+        if (req.body.group == null) return res.json({ requiresGroup: true });
+        group = req.body.group;
+        if (!Number.isInteger(group) || group < 1 || group > state.groupCount) throw new Error('組別無效。');
+        identity.addAccount(studentId);
+        identity.groups.set(studentId, group);
+      }
+      revoke(req);
+      identity.issue(res, { role: 'student', studentId });
+      res.json({ identity: { studentId, group } });
+      if (joiningActivity) {
+        for (const socket of io.sockets.sockets.values()) {
+          if (identity.get(socket.data.token)?.role === 'teacher') socket.emit('roster', roster());
+        }
+      }
+    } catch (error) {
+      res.status(400).json({ error: error.code ? '學生帳號無法儲存。' : error.message });
+    }
+  });
+
+  app.post('/api/session/logout', (req, res) => {
+    revoke(req);
+    identity.clearCookie(res);
+    res.json({ ok: true });
+  });
 
   function clearDeadlineTimer() {
     deadlineGeneration += 1;
@@ -45,14 +124,15 @@ function createQuizServer(options = {}) {
 
   function scheduleDeadline() {
     clearDeadlineTimer();
-    if (state.phase !== '搶答中' || state.deadlineAt === null) return;
     const serverNow = now();
-    const remaining = state.deadlineAt - serverNow;
-    if (remaining <= 0) {
-      state.finish(serverNow);
+    if (state.expireQuestions(serverNow)) sendState();
+    if (state.isExpired(serverNow)) {
+      state.finish(serverNow, true);
       sendState();
-      return;
     }
+    const deadline = state.nextDeadline();
+    if (deadline === null) return;
+    const remaining = deadline - serverNow;
     const generation = deadlineGeneration;
     deadlineTimer = scheduleTimeout(() => {
       if (generation !== deadlineGeneration) return;
@@ -74,12 +154,13 @@ function createQuizServer(options = {}) {
   }
 
   function requireTeacher(req, res, next) {
-    if (req.get('x-quiz-role') !== 'teacher') return res.status(403).json({ error: '此操作僅限老師使用。' });
+    if (identity.get(identity.token(req.headers))?.role !== 'teacher') return res.status(403).json({ error: '此操作僅限老師使用。' });
     next();
   }
 
-  app.get('/api/info', (_req, res) => {
+  app.get('/api/info', (req, res) => {
     try {
+      if (identity.get(identity.token(req.headers))?.role !== 'teacher') return res.json({ groupCount: state.groupCount });
       const credentials = readCredentials();
       serviceAccountEmail = credentials.client_email;
     } catch {
@@ -106,14 +187,42 @@ function createQuizServer(options = {}) {
 
   app.post('/api/groups', requireTeacher, (req, res) => {
     try {
-      state.setGroupCount(Number(req.body.groupCount));
+      const count = Number(req.body.groupCount);
+      if ([...identity.groups.values()].some((group) => group > count)) throw new Error('請先調整超出組數的學生組別。');
+      state.setGroupCount(count);
       sendState();
       res.json({ groupCount: state.groupCount });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
+  app.post('/api/groups/student', requireTeacher, (req, res) => {
+    try {
+      const id = identity.parseStudentId(req.body.studentId);
+      const group = req.body.group;
+      if (!identity.groups.has(id)) throw new Error('找不到本輪學生。');
+      if (!Number.isInteger(group) || group < 1 || group > state.groupCount) throw new Error('組別無效。');
+      if (state.phase === '已結束' || state.submissions.some((entry) => entry.studentId === id)) {
+        throw new Error('學生已作答或活動已結束，無法換組。');
+      }
+      identity.groups.set(id, group);
+      sendState();
+      res.json({ ok: true });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/questions/:number/:action', requireTeacher, (req, res) => {
+    try {
+      state.toggleQuestion(req.params.number, req.params.action);
+      scheduleDeadline();
+      sendState();
+      res.json({ ok: true });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
   app.post('/api/worksheet/import', requireTeacher, asyncRoute(async (req, res) => {
+    const generation = ++worksheetGeneration;
     const imported = await worksheetImporter(req.body.url, { credentialsPath, credentials: readCredentials() });
+    if (generation !== worksheetGeneration) return res.status(409).json({ error: '已有更新的匯入操作。' });
     state.setWorksheet(imported.parsed);
     currentSpreadsheetId = imported.spreadsheetId;
     currentSheetsClient = null;
@@ -142,8 +251,12 @@ function createQuizServer(options = {}) {
   });
 
   app.post('/api/phase/finish', requireTeacher, (req, res) => {
-    try { clearDeadlineTimer(); state.finish(); sendState(); res.json({ phase: state.phase }); }
-    catch (error) { res.status(400).json({ error: error.message }); }
+    try {
+      state.finish(undefined, req.body?.reveal === true);
+      scheduleDeadline();
+      sendState();
+      res.json({ phase: state.phase });
+    } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
   app.post('/api/reveal', requireTeacher, (req, res) => {
@@ -199,21 +312,23 @@ function createQuizServer(options = {}) {
   }));
 
   io.use((socket, next) => {
-    const role = socket.handshake.auth?.role;
-    const group = Number(socket.handshake.auth?.group);
-    if (role === 'teacher') socket.data.role = 'teacher';
-    else if (role === 'student' && Number.isInteger(group) && group > 0 && group <= state.groupCount) socket.data.role = { group };
-    else return next(new Error('請先選擇老師或有效組別。'));
+    const token = identity.token(socket.request.headers);
+    if (!identity.get(token)) return next(new Error('請先登入。'));
+    socket.data.token = token;
     next();
   });
 
   io.on('connection', (socket) => {
-    socket.emit('state', state.publicState(socket.data.role));
+    const role = sessionRole(identity.get(socket.data.token));
+    if (!role) return socket.disconnect(true);
+    socket.emit('state', socketState(role));
     socket.on('activity:new', (_payload, acknowledge = () => {}) => {
       try {
-        if (socket.data.role !== 'teacher') throw new Error('此操作僅限老師使用。');
+        if (identity.get(socket.data.token)?.role !== 'teacher') throw new Error('此操作僅限老師使用。');
         if (writebackInProgress) throw new Error(writebackBusyMessage);
         state.resetActivity();
+        identity.groups.clear();
+        worksheetGeneration += 1;
         clearDeadlineTimer();
         currentSpreadsheetId = null;
         currentSheetsClient = null;
@@ -225,17 +340,19 @@ function createQuizServer(options = {}) {
     });
     socket.on('answer:submit', (payload, acknowledge = () => {}) => {
       try {
-        if (socket.data.role === 'teacher') throw new Error('老師不能提交學生答案。');
+        const student = sessionRole(identity.get(socket.data.token));
+        if (!student?.group) throw new Error('請先以有效學生組別登入。');
         const receivedAt = now();
         if (state.isExpired(receivedAt)) {
-          clearDeadlineTimer();
-          state.finish(receivedAt);
-          sendState();
+          scheduleDeadline();
           throw new Error('搶答時間已到，無法提交答案。');
         }
-        const group = socket.data.role.group;
-        const entry = state.submit(group, payload?.questionNumber, payload?.answers, receivedAt);
-        acknowledge({ ok: true, entry });
+        if (state.expireQuestions(receivedAt)) {
+          scheduleDeadline();
+          sendState();
+        }
+        state.submit(student.group, payload?.questionNumber, payload?.answers, receivedAt, student.studentId);
+        acknowledge({ ok: true });
         sendState();
       } catch (error) { acknowledge({ ok: false, error: error.message }); }
     });
@@ -244,7 +361,15 @@ function createQuizServer(options = {}) {
   return { app, server, io, state };
 }
 
-const { app, server, io, state } = createQuizServer();
+if (require.main === module) {
+  const environmentPath = path.join(process.cwd(), '.env');
+  if (require('node:fs').existsSync(environmentPath)) process.loadEnvFile(environmentPath);
+}
+const { app, server, io, state } = createQuizServer(require.main === module ? {
+  accountsPath: path.join(process.cwd(), '.quiz-data', 'students.json'),
+  teacherUsername: process.env.QUIZ_TEACHER_USERNAME,
+  teacherPassword: process.env.QUIZ_TEACHER_PASSWORD
+} : {});
 const port = Number(process.env.PORT) || 3000;
 if (require.main === module) {
   server.listen(port, '127.0.0.1', () => console.log(`課堂搶答系統已啟動：http://localhost:${port}`));

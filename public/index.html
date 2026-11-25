@@ -11,14 +11,30 @@
     <header><p class="eyebrow">課堂即時互動</p><h1>課堂搶答系統</h1><p class="intro">老師主持活動，各組即時提交答案。</p></header>
     <section class="card" id="entry-card">
       <h2>加入活動</h2>
-      <label for="role">身分</label>
-      <select id="role"><option value="student">學生組別</option><option value="teacher">老師</option></select>
-      <label for="group">組別</label>
-      <select id="group"></select>
-      <button id="join">進入活動</button>
+      <form id="student-login">
+        <label for="student-id">學號</label>
+        <input id="student-id" inputmode="numeric" required>
+        <div id="group-entry" class="hidden">
+          <label for="group">組別</label>
+          <select id="group"></select>
+        </div>
+        <button id="join">學生登入</button>
+      </form>
+      <details>
+        <summary>教師登入</summary>
+        <form id="teacher-login">
+          <label for="teacher-username">教師帳號</label>
+          <input id="teacher-username" autocomplete="username" required>
+          <label for="teacher-password">密碼</label>
+          <input id="teacher-password" type="password" autocomplete="current-password" required>
+          <button>登入控制台</button>
+        </form>
+      </details>
+      <p id="login-notice" role="status" class="notice"></p>
     </section>
     <section class="card hidden" id="activity-card">
       <div class="status-row"><div><p class="eyebrow">目前階段</p><h2 id="phase">準備中</h2></div><span class="badge" id="identity"></span></div>
+      <button id="logout" class="secondary">登出</button>
       <p id="import-status" class="hint">學習單狀態：未匯入</p>
       <p id="fair-mode-status" class="hint hidden">公平模式已開啟</p>
       <div class="timer-panel"><strong id="timer-display">不限時</strong><p id="leaderboard" class="hidden"></p></div>
@@ -26,7 +42,10 @@
         <div class="tool-block"><h3>活動設定</h3><form id="group-form"><label for="group-count">組數（正整數）</label><div class="inline"><input id="group-count" type="number" min="1" step="1" value="4"><button class="secondary">更新組數</button></div></form><label for="timer-limit">搶答時間</label><select id="timer-limit"><option value="">不限時</option><option value="30">30 秒</option><option value="60">60 秒</option><option value="120">120 秒</option><option value="180">180 秒</option><option value="custom">自訂秒數</option></select><input id="custom-seconds" class="hidden" type="number" min="1" step="1" placeholder="輸入正整數秒數"><button id="save-timer" class="secondary">套用時間</button><label><input id="per-question" type="checkbox"> 逐題搶答，每題使用相同時限</label></div>
         <div class="tool-block"><h3>公平模式</h3><label><input id="fair-mode-enabled" type="checkbox"> 開啟公平模式</label><label for="fair-delay">每題延遲秒數</label><input id="fair-delay" type="number" min="1" step="1" value="3"><button id="save-fair-mode" class="secondary">套用公平設定</button><p class="hint">各組已成功題數會影響答案判定時間。</p></div>
         <div class="tool-block"><h3>匯入 Google 學習單</h3><label for="sheet-url">試算表網址</label><div class="inline"><input id="sheet-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/..."><button id="import">掃描匯入</button></div><p id="service-account" class="hint">讀取服務帳號資訊中…</p><p id="import-summary" class="hint"></p></div>
-        <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button><button id="download-csv" class="secondary hidden">下載 CSV 結果</button><button id="new-activity" class="secondary hidden">開始新活動</button><button id="open-reveal" class="secondary hidden">開啟投影揭曉</button></div>
+        <div id="question-controls"></div>
+        <div id="student-groups"></div>
+        <label><input id="settle-hidden" type="checkbox"> 手動結算後逐題揭曉</label>
+        <div class="inline controls"><button id="start">開始搶答</button><button id="finish" class="secondary">結束搶答</button><button id="writeback" class="secondary">回寫成功答案</button><button id="download-csv" class="secondary hidden">下載 CSV 結果</button><button id="new-activity" class="secondary hidden">開始新活動</button><button id="publish-results" class="secondary hidden">公布全部結果</button><button id="open-reveal" class="secondary hidden">開啟投影揭曉</button></div>
       </div>
       <p id="notice" role="status" class="notice"></p>
       <div id="student-work" class="hidden"></div>

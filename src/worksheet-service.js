@@ -81,7 +81,7 @@ async function writeWinningAnswers(sheets, spreadsheetId, questions, submissions
   if (!data.length) return { updatedCells: 0 };
   const result = await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId,
-    requestBody: { valueInputOption: 'USER_ENTERED', data }
+    requestBody: { valueInputOption: 'RAW', data }
   });
   return { updatedCells: result.data.totalUpdatedCells ?? data.length };
 }

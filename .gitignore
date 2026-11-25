@@ -2,3 +2,8 @@ node_modules/
 credentials.json
 .env
 *.csv
+
+.env.*
+!.env.example
+.quiz-data/
+.pdf-tools/

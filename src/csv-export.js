@@ -1,4 +1,4 @@
-const CSV_HEADERS = ['題號', '小題號', '組別', '答案', '實際送出時間', '判定時間', '搶答順位', '狀態', '是否使用公平模式'];
+const CSV_HEADERS = ['題號', '小題號', '組別', '答案', '實際送出時間', '判定時間', '搶答順位', '狀態', '是否使用公平模式', '學號', '審核狀態', '是否獲勝'];
 
 function taiwanTimestamp(value) {
   if (value === null || value === undefined || value === '') return '';
@@ -45,7 +45,8 @@ function buildQuizCsv(state, exportedAt = Date.now()) {
         }
         rows.push([
           question.number, subquestions[index], group, answer, receivedAt, judgedAt, rank, status,
-          state.fairModeEnabled ? '是' : '否'
+          state.fairModeEnabled ? '是' : '否', submission?.studentId ?? '',
+          submission ? (submission.rejected ? '已駁回' : '有效') : '', submission?.rank === 1 ? '是' : '否'
         ]);
       }
     }

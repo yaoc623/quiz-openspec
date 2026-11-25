@@ -2,6 +2,27 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { writeWinningAnswers } = require('../src/worksheet-service');
 
+test('批次回填遇暫時錯誤會按退避重試，權限錯誤直接回報', async () => {
+  const questions = [{ number: '1', subquestions: [{ target: { sheet: '題目', column: 8, row: 2 } }] }];
+  const submitted = [{ questionNumber: '1', answers: ['答案'], rank: 1 }];
+  const waits = [];
+  const writes = [];
+  const sheets = { spreadsheets: { values: {
+    async batchUpdate(request) {
+      writes.push(request);
+      if (writes.length < 3) throw Object.assign(new Error('暫時無法寫入'), { status: 503 });
+      return { data: { totalUpdatedCells: 1 } };
+    }
+  } } };
+  const options = { retry: { wait: (delay) => waits.push(delay) } };
+  assert.deepEqual(await writeWinningAnswers(sheets, 'mock', questions, submitted, options), { updatedCells: 1 });
+  assert.deepEqual(waits, [250, 500]);
+  assert.deepEqual(writes, Array(3).fill(writes[0]));
+  sheets.spreadsheets.values.batchUpdate = async () => { throw Object.assign(new Error('無編輯權限'), { status: 403 }); };
+  await assert.rejects(writeWinningAnswers(sheets, 'mock', questions, submitted, options), /無編輯權限/);
+  assert.deepEqual(waits, [250, 500]);
+});
+
 test('試算表回寫只採駁回後遞補答案，無有效答案的題目不寫入', async () => {
   let request;
   const sheets = { spreadsheets: { values: { batchUpdate: async (value) => { request = value; return { data: { totalUpdatedCells: value.requestBody.data.length } }; } } } };

@@ -8,6 +8,9 @@ class QuizState {
     this.phase = '準備中';
     this.worksheet = null;
     this.submissions = [];
+    this.pending = [];
+    this.receipts = [];
+    this.revealedQuestions = null;
     this.sequence = 0;
     this.writebackCompleted = false;
     this.timerLimitSeconds = null;
@@ -33,6 +36,9 @@ class QuizState {
     if (this.phase !== '準備中') throw new Error('只有準備階段可以匯入學習單。');
     this.worksheet = worksheet;
     this.submissions = [];
+    this.pending = [];
+    this.receipts = [];
+    this.revealedQuestions = null;
     this.sequence = 0;
     this.writebackCompleted = false;
     this.revealIndex = -1;
@@ -49,7 +55,7 @@ class QuizState {
   setFairMode(enabled, delaySeconds = this.fairDelaySeconds) {
     if (this.phase !== '準備中') throw new Error('只有準備階段可以設定公平模式。');
     if (typeof enabled !== 'boolean') throw new Error('公平模式必須選擇開啟或關閉。');
-    if (!Number.isInteger(delaySeconds) || delaySeconds < 1) throw new Error('每題延遲秒數必須是正整數。');
+    if (!Number.isSafeInteger(delaySeconds * 1000) || !Number.isInteger(delaySeconds) || delaySeconds < 1) throw new Error('每題延遲秒數必須是正整數。');
     this.fairModeEnabled = enabled;
     this.fairDelaySeconds = delaySeconds;
   }
@@ -148,6 +154,9 @@ class QuizState {
     this.phase = '準備中';
     this.worksheet = null;
     this.submissions = [];
+    this.pending = [];
+    this.receipts = [];
+    this.revealedQuestions = null;
     this.sequence = 0;
     this.writebackCompleted = false;
     this.timerLimitSeconds = null;
@@ -174,42 +183,119 @@ class QuizState {
     if (!Number.isInteger(index) || index < -1 || index > max) throw new Error('揭曉題目超出範圍。');
     this.revealModeActive = true;
     this.revealIndex = index;
+    this.revealedQuestions = null;
   }
 
-  submit(group, questionNumber, answers, receivedAtMs = this.now(), studentId) {
+  revealQuestion(number, visible) {
+    if (this.phase !== '已結束' || !this.worksheet.questions.some((question) => question.number === number)) {
+      throw new Error('活動結算後才能公布題目。');
+    }
+    this.revealedQuestions ??= this.worksheet.questions.filter((_question, index) =>
+      !this.revealModeActive || index <= this.revealIndex).map((question) => question.number);
+    this.revealModeActive = true;
+    const visibleQuestions = new Set(this.revealedQuestions);
+    if (visible) visibleQuestions.add(number);
+    else visibleQuestions.delete(number);
+    this.revealedQuestions = [...visibleQuestions];
+  }
+
+  snapshot() {
+    const { now, questionWindows, ...data } = this;
+    return { ...data, questionWindows: [...questionWindows] };
+  }
+
+  restore(data) {
+    Object.assign(this, data, { questionWindows: new Map(data.questionWindows) });
+  }
+
+  questionIsOpen(number) {
+    if (this.phase !== '搶答中') return false;
+    if (this.independentQuestions) return this.questionWindows.get(number)?.open === true;
+    return this.questionIndex === null || this.worksheet.questions[this.questionIndex]?.number === number;
+  }
+
+  isConfirmed(number) {
+    return !this.questionIsOpen(number) && !this.pending.some((receipt) => receipt.questionNumber === number);
+  }
+
+  answerError(group, number, answers) {
+    const question = this.worksheet?.questions.find((item) => item.number === number);
+    if (!Number.isInteger(group) || group < 1 || group > this.groupCount) return '組別無效。';
+    if (!question || !Array.isArray(answers) || answers.length !== question.subquestions.length ||
+        answers.some((value) => typeof value !== 'string' || !value.trim() || value.length > 8000)) {
+      return '請一次填寫此題所有小題答案（每小題上限 8000 字）。';
+    }
+    return null;
+  }
+
+  admit({ group, studentId, questionNumber, answers, receivedAtMs, receivedAtNs, orderNs }) {
+    const previous = this.receipts.find((item) => item.studentId === studentId && item.questionNumber === questionNumber);
+    if (previous) {
+      return { previous };
+    }
+    const sequence = ++this.sequence;
+    const question = this.worksheet?.questions.find((item) => item.number === questionNumber);
+    if (!question || !this.questionIsOpen(questionNumber) || this.isExpired(receivedAtMs) ||
+        (this.independentQuestions && this.questionWindows.get(questionNumber).deadlineAt !== null &&
+          receivedAtMs >= this.questionWindows.get(questionNumber).deadlineAt)) return { closed: true };
+    const successfulCountAtSubmission = this.submissions.filter((item) => item.group === group &&
+      item.rank === 1 && this.isConfirmed(item.questionNumber)).length;
+    const penaltySeconds = this.fairModeEnabled ? successfulCountAtSubmission * this.fairDelaySeconds : 0;
+    const receipt = {
+      studentId, group, questionNumber, answers, sequence, receivedAtMs, receivedAtNs, orderNs,
+      successfulCountAtSubmission, penaltySeconds, status: '已送出'
+    };
+    this.receipts.push(receipt);
+    this.pending.push(receipt);
+    return { receipt };
+  }
+
+  processPending() {
+    const affected = new Set();
+    const processed = this.pending.splice(0);
+    for (const pending of processed) {
+      const receipt = this.receipts.find((item) => item.sequence === pending.sequence);
+      const error = this.answerError(receipt.group, receipt.questionNumber, receipt.answers);
+      if (error) {
+        receipt.status = '未計入';
+        receipt.error = error;
+        continue;
+      }
+      const judgedAtMs = receipt.receivedAtMs + receipt.penaltySeconds * 1000;
+      this.submissions.push({
+        ...receipt, receivedAt: new Date(receipt.receivedAtMs).toISOString(),
+        judgedAtMs, judgedAt: new Date(judgedAtMs).toISOString(),
+        judgedNs: String(BigInt(receipt.orderNs) + BigInt(receipt.penaltySeconds) * 1000000000n),
+        rejected: false, reviews: []
+      });
+      affected.add(receipt.questionNumber);
+    }
+    for (const number of affected) this.recalculateRanks(number);
+    return processed;
+  }
+
+  submit(group, questionNumber, answers, receivedAtMs = this.now(), studentId = String(group)) {
+    const number = String(questionNumber);
     if (this.phase !== '搶答中') throw new Error('目前不是搶答階段，無法提交答案。');
     if (this.isExpired(receivedAtMs)) throw new Error('搶答時間已到，無法提交答案。');
-    if (!Number.isInteger(group) || group < 1 || group > this.groupCount) throw new Error('組別無效。');
-    const question = this.worksheet?.questions.find((item) => item.number === String(questionNumber));
-    if (!question) throw new Error('題號不存在。');
-    if (this.independentQuestions) {
-      const window = this.questionWindows.get(question.number);
-      if (!window?.open || (window.deadlineAt !== null && receivedAtMs >= window.deadlineAt)) {
-        throw new Error('此題目前未開放作答。');
-      }
-    }
-    if (this.questionIndex !== null && question !== this.worksheet.questions[this.questionIndex]) throw new Error('此題目前未開放作答。');
-    if (!Array.isArray(answers) || answers.length !== question.subquestions.length || answers.some((value) => typeof value !== 'string' || !value.trim())) throw new Error('請一次填寫此題所有小題答案。');
-    if (this.submissions.some((item) => (item.group === group || (studentId && item.studentId === studentId)) && item.questionNumber === question.number)) throw new Error('本組已提交此題，不能重複提交。');
-    const successfulCount = this.submissions.filter((item) => item.group === group && item.rank === 1 && !item.rejected).length;
-    const penaltySeconds = this.fairModeEnabled ? successfulCount * this.fairDelaySeconds : 0;
-    const judgedAtMs = receivedAtMs + penaltySeconds * 1000;
-    const entry = {
-      group, ...(studentId ? { studentId } : {}), questionNumber: question.number, answers: [...answers], receivedAt: new Date(receivedAtMs).toISOString(), receivedAtMs,
-      sequence: ++this.sequence, successfulCountAtSubmission: successfulCount, penaltySeconds,
-      judgedAtMs, judgedAt: new Date(judgedAtMs).toISOString(), rejected: false
-    };
-    this.submissions.push(entry);
-    this.recalculateRanks(question.number);
-    return entry;
+    const error = this.answerError(group, number, answers);
+    if (error) throw new Error(error);
+    const orderNs = String(BigInt(receivedAtMs) * 1000000n);
+    const outcome = this.admit({ group, studentId, questionNumber: number, answers, receivedAtMs, receivedAtNs: orderNs, orderNs });
+    if (outcome.previous) throw new Error('此學生已提交此題，不能重複提交。');
+    if (outcome.closed) throw new Error('此題目前未開放作答。');
+    this.processPending();
+    return this.submissions.find((entry) => entry.sequence === outcome.receipt.sequence);
   }
 
   recalculateRanks(questionNumber) {
     const entries = this.submissions.filter((item) => item.questionNumber === questionNumber);
     const active = entries.filter((entry) => !entry.rejected);
-    active.sort((a, b) => this.fairModeEnabled
-      ? a.judgedAtMs - b.judgedAtMs || a.receivedAtMs - b.receivedAtMs || a.sequence - b.sequence
-      : a.sequence - b.sequence);
+    active.sort((a, b) => {
+      const first = BigInt(a.judgedNs);
+      const second = BigInt(b.judgedNs);
+      return first === second ? a.sequence - b.sequence : first < second ? -1 : 1;
+    });
     active.forEach((entry, index) => { entry.rank = index + 1; });
     entries.filter((entry) => entry.rejected).forEach((entry) => { entry.rank = null; });
   }
@@ -221,6 +307,7 @@ class QuizState {
     if (reject && (entry.rejected || entry.rank !== 1)) throw new Error('只能駁回目前成功答案。');
     if (!reject && !entry.rejected) throw new Error('這筆作答沒有被駁回。');
     entry.rejected = reject;
+    entry.reviews.push({ rejected: reject, at: new Date(this.now()).toISOString() });
     this.writebackCompleted = false;
     this.recalculateRanks(entry.questionNumber);
     return entry;
@@ -243,7 +330,7 @@ class QuizState {
     const rows = Array.from({ length: this.groupCount }, (_, index) => ({ group: index + 1, score: 0, totalSubmissionTimeMs: 0 }));
     for (const question of this.worksheet?.questions ?? []) {
       const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1 && !item.rejected);
-      if (winner) rows[winner.group - 1].score += 1;
+      if (winner && this.isConfirmed(question.number)) rows[winner.group - 1].score += 1;
     }
     for (const entry of this.submissions) {
       if (this.roundStartedAt !== null) rows[entry.group - 1].totalSubmissionTimeMs += Math.max(0, entry.receivedAtMs - this.roundStartedAt);
@@ -265,13 +352,14 @@ class QuizState {
       });
     }
     base.revealModeActive = this.revealModeActive;
-    if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 && !entry.rejected })), leaderboard: this.leaderboard() };
+    base.revealedQuestions = this.revealedQuestions;
+    if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 && !entry.rejected, confirmed: this.isConfirmed(entry.questionNumber) })), leaderboard: this.leaderboard() };
     const group = role?.group;
     const studentId = role?.studentId;
     if (studentId) {
       base.identity = { studentId, group };
-      base.submissions = this.submissions.filter((entry) => entry.studentId === studentId)
-        .map(({ group, questionNumber, answers }) => ({ group, questionNumber, answers: [...answers] }));
+      base.submissions = this.receipts.filter((entry) => entry.studentId === studentId)
+        .map(({ group, questionNumber, answers, status, error }) => ({ group, questionNumber, answers, status, error }));
     }
     if (this.phase === '已結束') {
       const winners = this.worksheet?.questions.map((question) => {
@@ -280,8 +368,12 @@ class QuizState {
       }) ?? [];
       const rejectedSubmissions = this.submissions.filter((entry) => entry.rejected).map(({ group: rejectedGroup, questionNumber, sequence }) => ({ group: rejectedGroup, questionNumber, sequence }));
       if (!this.revealModeActive) return { ...base, winners, rejectedSubmissions, leaderboard: this.leaderboard() };
-      const visibleWinners = this.revealIndex < 0 ? [] : winners.slice(0, this.revealIndex + 1);
-      return { ...base, winners: visibleWinners, rejectedSubmissions: rejectedSubmissions.filter((entry) => this.worksheet.questions.findIndex((question) => question.number === entry.questionNumber) <= this.revealIndex), leaderboard: this.revealIndex >= (this.worksheet?.questions.length ?? 0) ? this.leaderboard() : undefined };
+      const visibleNumbers = new Set(this.revealedQuestions ??
+        (this.revealIndex < 0 ? [] : winners.slice(0, this.revealIndex + 1).map((entry) => entry.questionNumber)));
+      const visibleWinners = winners.filter((entry) => visibleNumbers.has(entry.questionNumber));
+      const allRevealed = this.revealedQuestions ? visibleWinners.length === winners.length : this.revealIndex >= winners.length;
+      return { ...base, winners: visibleWinners, rejectedSubmissions: rejectedSubmissions.filter((entry) =>
+        visibleNumbers.has(entry.questionNumber)), leaderboard: allRevealed ? this.leaderboard() : undefined };
     }
     if (studentId) return base;
     return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt, rejected }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt, rejected })) };

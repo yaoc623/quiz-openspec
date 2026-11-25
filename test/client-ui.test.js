@@ -31,11 +31,13 @@ class FakeElement {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = [...children]; }
   click() { this.clicked = true; }
+  querySelectorAll(tag) { return this.children.filter((child) => child.tag === tag); }
+  querySelector(tag) { return this.querySelectorAll(tag)[0]; }
 }
 
 function bootClient() {
   const ids = ['role', 'group', 'entry-card', 'activity-card', 'teacher-tools', 'student-work', 'answer-list', 'results', 'notice', 'phase', 'identity', 'group-count', 'group-form', 'import', 'finish', 'start', 'writeback', 'download-csv', 'new-activity', 'import-summary', 'import-status', 'join', 'service-account', 'sheet-url', 'timer-display', 'leaderboard', 'timer-limit', 'custom-seconds', 'save-timer', 'fair-mode-status', 'fair-mode-enabled', 'fair-delay', 'save-fair-mode', 'open-reveal', 'reveal-stage'];
-  const elements = new Map([...ids, 'per-question', 'student-login', 'teacher-login', 'student-id', 'logout', 'question-controls', 'student-groups', 'login-notice', 'settle-hidden', 'publish-results'].map((id) => [id, new FakeElement(id)]));
+  const elements = new Map([...ids, 'per-question', 'student-login', 'teacher-login', 'student-id', 'logout', 'question-controls', 'student-groups', 'login-notice', 'settle-hidden', 'publish-results', 'writeback-status'].map((id) => [id, new FakeElement(id)]));
   elements.get('per-question').checked = false;
   elements.get('role').value = 'student';
   elements.get('group').value = '1';
@@ -55,7 +57,7 @@ function bootClient() {
       throw new Error(`未支援的選擇器：${selector}`);
     },
     querySelectorAll() { return []; },
-    createElement() { const element = new FakeElement(); createdElements.push(element); return element; }
+    createElement(tag) { const element = new FakeElement(); element.tag = tag; createdElements.push(element); return element; }
     ,addEventListener() {}
   };
   const context = {
@@ -298,7 +300,7 @@ test('老師作答列可駁回成功答案並取消駁回，學生結果顯示�
     { sequence: 1, group: 1, questionNumber: '1', answers: ['答案'], receivedAt: '時間', rank: null, rejected: true, successful: false },
     { sequence: 2, group: 2, questionNumber: '1', answers: ['候補'], receivedAt: '時間', rank: 1, rejected: false, successful: true }
   ], winners: [{ questionNumber: '1', group: null, answers: [], noCorrectAnswer: true }], rejectedSubmissions: [{ group: 1, questionNumber: '1', sequence: 1 }], leaderboard: [] });
-  const rejectedRow = client.elements.get('answer-list').children[1];
+  const rejectedRow = client.elements.get('answer-list').children[2];
   assert.match(rejectedRow.children[1].textContent, /已駁回/);
   assert.equal(rejectedRow.children[2].textContent, '取消駁回');
   assert.equal(rejectedRow.children[2].disabled, false);
@@ -336,4 +338,43 @@ test('老師只在活動結束後看見 CSV 下載並使用同源 Session 取得
   assert.equal(downloadLink.download, 'quiz-result-20261120-163456.csv');
   assert.equal(downloadLink.clicked, true);
   assert.match(client.elements.get('notice').textContent, /開始下載/);
+});
+
+test('學生先檢查題組，傳送中鎖定，未回覆用相同內容重送，未計入保持鎖定', async () => {
+  const client = bootClient();
+  await flushInitialization();
+  await client.join();
+  const socket = client.sockets[0];
+  const attempts = [];
+  const retry = new Map();
+  client.context.setTimeout = (callback) => {
+    retry.set(callback, callback);
+    return callback;
+  };
+  client.context.clearTimeout = (callback) => retry.delete(callback);
+  socket.connected = true;
+  socket.volatile = { timeout: () => ({ emit: (_event, payload, acknowledge) => attempts.push({ payload, acknowledge }) }) };
+  socket.receive('state', { activityId: 'round', phase: '搶答中', independentQuestions: true,
+    groupCount: 4, questions: [{ number: '1', open: true, subquestions: [{ label: 'a' }, { label: 'b' }] }], submissions: [] });
+  const work = client.elements.get('student-work');
+  const card = work.children[0];
+  const button = card.querySelector('button');
+  const inputs = card.querySelectorAll('input');
+  inputs[0].value = '第一小題';
+  button.handlers.click();
+  assert.equal(attempts.length, 0);
+  assert.equal(button.disabled, false);
+  inputs[1].value = '第二小題';
+  button.handlers.click();
+  assert.equal(button.textContent, '傳送中');
+  assert.ok(inputs.every((input) => input.disabled));
+  attempts[0].acknowledge(new Error('逾時'));
+  [...retry.values()][0]();
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].payload, attempts[1].payload);
+  assert.deepEqual(JSON.parse(JSON.stringify(attempts[1].payload)), { activityId: 'round', questionNumber: '1', answers: ['第一小題', '第二小題'] });
+  attempts[1].acknowledge(null, { ok: true, status: '未計入', error: '驗證失敗' });
+  assert.ok(work.children[0].querySelector('button').disabled);
+  assert.ok(work.children[0].children.some((element) => element.textContent === '未計入：驗證失敗'));
+  assert.equal(retry.size, 0);
 });

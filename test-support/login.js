@@ -18,6 +18,15 @@ function teacherCookie(base) {
   return teacherCookies.get(base);
 }
 
+function trackActivity(client) {
+  let activityId;
+  client.on('state', (value) => { activityId = value.activityId; });
+  const emit = client.emit.bind(client);
+  client.emit = (event, payload, ...args) => emit(event,
+    event === 'answer:submit' ? { activityId, ...payload } : payload, ...args);
+  return client;
+}
+
 function authenticatedClient(base, { auth: { role, group }, ...options }) {
   const client = io(base, { ...options, autoConnect: false });
   const cookie = role === 'teacher' ? teacherCookie(base)
@@ -27,7 +36,7 @@ function authenticatedClient(base, { auth: { role, group }, ...options }) {
     client.io.opts.extraHeaders = value ? { cookie: value } : {};
     client.connect();
   });
-  return client;
+  return trackActivity(client);
 }
 
-module.exports = { teacherOptions, teacherCredentials, teacherCookie, login, authenticatedClient };
+module.exports = { teacherOptions, teacherCredentials, teacherCookie, login, authenticatedClient, trackActivity };

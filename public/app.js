@@ -12,6 +12,50 @@ let currentRole;
 let latestState;
 let groupCount = 4;
 const answerDrafts = new Map();
+const outgoingAnswers = new Map();
+const answerStatuses = new Map();
+
+function draftStorageKey() {
+  return `quiz-drafts:${latestState?.activityId}:${currentRole?.studentId}`;
+}
+
+function saveDrafts() {
+  try { globalThis.sessionStorage?.setItem(draftStorageKey(), JSON.stringify([...answerDrafts])); }
+  catch { /* 儲存空間不可用時仍保留目前畫面的草稿。 */ }
+}
+
+function restoreDrafts() {
+  try {
+    for (const [number, answers] of JSON.parse(globalThis.sessionStorage?.getItem(draftStorageKey()) ?? '[]')) {
+      answerDrafts.set(number, answers);
+    }
+  } catch { /* 無法讀取時以空白草稿開始。 */ }
+}
+
+function updateAnswerStatus(status) {
+  if (status.activityId !== latestState?.activityId) return;
+  const outgoing = outgoingAnswers.get(status.questionNumber);
+  if (outgoing) clearTimeout(outgoing.retryTimer);
+  outgoingAnswers.delete(status.questionNumber);
+  answerStatuses.set(status.questionNumber, status);
+  if (status.status !== '已截止') {
+    answerDrafts.delete(status.questionNumber);
+    saveDrafts();
+  }
+  renderState(latestState);
+}
+
+function sendAnswer(outgoing) {
+  const { payload } = outgoing;
+  if (outgoingAnswers.get(payload.questionNumber) !== outgoing || payload.activityId !== latestState?.activityId) return;
+  clearTimeout(outgoing.retryTimer);
+  outgoing.retryTimer = setTimeout(() => sendAnswer(outgoing), 2000);
+  if (!socket.connected) return;
+  socket.volatile.timeout(1800).emit('answer:submit', payload, (error, reply) => {
+    if (error || reply?.retry || outgoingAnswers.get(payload.questionNumber) !== outgoing) return;
+    updateAnswerStatus({ ...payload, ...reply, answers: reply.answers ?? payload.answers });
+  });
+}
 let timerAnchorRemaining = null;
 let timerAnchorClientTime = 0;
 let timerAnchorDeadline = null;
@@ -70,8 +114,16 @@ async function connect(identity) {
     latestState.students = students;
     renderTeacherControls(latestState);
   });
+  socket.on('answer:status', updateAnswerStatus);
   socket.on('state', (value) => {
-    if (value.phase === '已結束' || value.activityId !== latestState?.activityId) answerDrafts.clear();
+    const newActivity = value.activityId !== latestState?.activityId;
+    if (newActivity) {
+      answerDrafts.clear();
+      answerStatuses.clear();
+      for (const outgoing of outgoingAnswers.values()) clearTimeout(outgoing.retryTimer);
+      outgoingAnswers.clear();
+    }
+    if (value.phase === '已結束') answerDrafts.clear();
     if (value.identity) {
       currentRole = value.identity;
       if (!currentRole.group) {
@@ -92,9 +144,20 @@ async function connect(identity) {
       custom.value = choice === 'custom' ? String(limit) : '';
       custom.classList.toggle('hidden', choice !== 'custom');
       document.querySelector('#per-question').checked = false;
-      document.querySelector('#settle-hidden').checked = false;
+      document.querySelector('#settle-hidden').checked = true;
     }
     latestState = value;
+    if (currentRole !== 'teacher') {
+      if (newActivity && value.phase !== '已結束') restoreDrafts();
+      for (const entry of value.submissions ?? []) {
+        answerStatuses.set(entry.questionNumber, entry);
+        const outgoing = outgoingAnswers.get(entry.questionNumber);
+        if (outgoing) clearTimeout(outgoing.retryTimer);
+        outgoingAnswers.delete(entry.questionNumber);
+        answerDrafts.delete(entry.questionNumber);
+      }
+      saveDrafts();
+    }
     renderState(value);
   });
   entryCard.classList.add('hidden');
@@ -117,11 +180,13 @@ function createQuestionCard(question, canAnswer) {
     input.type = 'text';
     input.dataset.answerIndex = String(index);
     input.autocomplete = 'off';
+    input.maxLength = 8000;
     input.value = answerDrafts.get(question.number)?.[index] ?? '';
     input.addEventListener('input', () => {
       const draft = answerDrafts.get(question.number) ?? [];
       draft[index] = input.value;
       answerDrafts.set(question.number, draft);
+      saveDrafts();
     });
     input.disabled = !canAnswer;
     card.append(label, input);
@@ -131,13 +196,16 @@ function createQuestionCard(question, canAnswer) {
   button.disabled = !canAnswer;
   button.addEventListener('click', () => {
     const inputs = [...card.querySelectorAll('input')];
-    socket.emit('answer:submit', { questionNumber: question.number, answers: inputs.map((input) => input.value) }, (reply) => {
-      if (!reply.ok) return showNotice(reply.error, true);
-      inputs.forEach((input) => { input.disabled = true; });
-      button.disabled = true;
-      button.textContent = '已送出';
-      showNotice(`第 ${question.number} 題已送出。`);
-    });
+    const answers = inputs.map((input) => input.value);
+    if (answers.some((answer) => !answer.trim())) return showNotice('請先填寫所有答案。', true);
+    const payload = { activityId: latestState.activityId, questionNumber: question.number, answers };
+    const outgoing = { payload, retryTimer: null };
+    outgoingAnswers.set(question.number, outgoing);
+    answerStatuses.set(question.number, { ...payload, status: '傳送中' });
+    inputs.forEach((input) => { input.disabled = true; });
+    button.disabled = true;
+    button.textContent = '傳送中';
+    sendAnswer(outgoing);
   });
   card.append(button);
   return card;
@@ -170,7 +238,9 @@ function renderState(value) {
     const finish = document.querySelector('#finish');
     finish.disabled = value.phase !== '搶答中' && !betweenQuestions;
     finish.textContent = value.independentQuestions ? '結算搶答' : value.currentQuestionNumber && !betweenQuestions && value.phase === '搶答中' ? '關閉本題' : '結束搶答';
-    document.querySelector('#writeback').disabled = value.phase !== '已結束';
+    document.querySelector('#writeback').disabled = value.phase !== '已結束' || value.writebackStatus === '寫入中';
+    document.querySelector('#writeback-status').textContent = value.writebackStatus
+      ? `Google Sheets ${value.writebackStatus}${value.writebackError ? `｜${value.writebackError}` : ''}` : '';
     document.querySelector('#download-csv').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#open-reveal').classList.toggle('hidden', value.phase !== '已結束');
@@ -189,15 +259,18 @@ function renderState(value) {
     const heading = document.createElement('h3');
     heading.textContent = '即時作答紀錄';
     answerList.append(heading);
-    value.submissions.forEach((entry) => {
+    const ordered = [...value.submissions].sort((a, b) => a.questionNumber.localeCompare(b.questionNumber, 'zh-Hant', { numeric: true }) ||
+      (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.sequence - b.sequence);
+    ordered.forEach((entry) => {
       const row = document.createElement('article');
       row.className = 'submission';
       const group = document.createElement('strong');
       group.textContent = `${entry.studentId ? `學號 ${entry.studentId}・` : ''}第 ${entry.group} 組・第 ${entry.questionNumber} 題`;
       const content = document.createElement('p');
+      const winnerLabel = entry.successful ? (entry.confirmed === false ? '（暫定第一名）' : '（搶答成功）') : '';
       content.textContent = value.fairModeEnabled
-        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`
-        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
+        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${winnerLabel}`
+        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${winnerLabel}`;
       row.append(group, content);
       if (!canEdit) {
         const review = document.createElement('button');
@@ -230,8 +303,9 @@ function renderState(value) {
     fairStatus.classList.toggle('hidden', !value.fairModeEnabled);
     studentWork.replaceChildren();
     answerList.replaceChildren();
-    if (value.phase !== '已結束' || value.submissions?.length) {
+    if (value.phase !== '已結束' || answerStatuses.size || value.submissions?.length) {
       const ownSubmissions = new Map((value.submissions ?? []).map((entry) => [entry.questionNumber, entry]));
+      for (const [number, entry] of answerStatuses) ownSubmissions.set(number, entry);
       value.questions.forEach((question) => {
         const canAnswer = value.independentQuestions ? question.open : value.phase === '搶答中' && (!value.currentQuestionNumber || value.currentQuestionNumber === question.number);
         if (value.phase === '已結束' && !ownSubmissions.has(question.number)) return;
@@ -240,12 +314,13 @@ function renderState(value) {
         const saved = ownSubmissions.get(question.number);
         if (saved) {
           answerDrafts.delete(question.number);
-          card.querySelectorAll('input').forEach((input, index) => { input.value = saved.answers[index] ?? ''; input.disabled = true; });
+          card.querySelectorAll('input').forEach((input, index) => { input.value = saved.answers?.[index] ?? ''; input.disabled = true; });
           card.querySelector('button').disabled = true;
-          card.querySelector('button').textContent = '已送出';
+          card.querySelector('button').textContent = saved.status ?? '已送出';
           const done = document.createElement('p');
           done.className = 'success';
-          done.textContent = '你的答案已鎖定';
+          done.textContent = saved.status === '未計入' ? `未計入：${saved.error}`
+            : saved.status === '已截止' ? '題目已截止' : '你的答案已鎖定';
           card.append(done);
         }
         studentWork.append(card);
@@ -268,6 +343,11 @@ function renderState(value) {
         const text = document.createElement('p');
         text.textContent = winner ? (winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功${winner.studentId ? `（學號 ${winner.studentId}）` : ''}，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`) : `第 ${question.number} 題：尚未揭曉`;
         row.append(text);
+        if (winner) {
+          const team = document.createElement('p');
+          team.textContent = winner.group === currentRole.group ? '我們組搶到了' : '我們組沒有搶到';
+          row.append(team);
+        }
         results.append(row);
       });
       (value.rejectedSubmissions ?? []).forEach((entry) => {
@@ -334,7 +414,7 @@ async function changeReveal(index) {
 
 document.querySelector('#publish-results').addEventListener('click', () => changeReveal(latestState.questions.length));
 document.querySelector('#open-reveal').addEventListener('click', () => {
-  teacherRevealOpen = true; revealStage.classList.remove('hidden'); revealStage.requestFullscreen?.(); renderReveal(latestState); changeReveal(-1);
+  teacherRevealOpen = true; revealStage.classList.remove('hidden'); revealStage.requestFullscreen?.(); renderReveal(latestState);
 });
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) { teacherRevealOpen = false; revealStage.classList.add('hidden'); } });
 document.addEventListener('keydown', (event) => {
@@ -370,6 +450,21 @@ function renderTeacherControls(value) {
       row.append(button);
       controls.append(row);
     });
+  }
+  if (value.phase === '已結束') {
+    for (const [index, question] of value.questions.entries()) {
+      const visible = value.revealedQuestions ? value.revealedQuestions.includes(question.number)
+        : !value.revealModeActive || index <= value.revealIndex;
+      const button = document.createElement('button');
+      button.textContent = `第 ${question.number} 題${visible ? '：已公布' : '：公布結果'}`;
+      button.disabled = visible;
+      button.onclick = async () => {
+        try {
+          await api(`/api/reveal/question/${encodeURIComponent(question.number)}`, { method: 'POST', body: JSON.stringify({ visible: true }) });
+        } catch (error) { showNotice(error.message, true); }
+      };
+      controls.append(button);
+    }
   }
   const roster = document.querySelector('#student-groups');
   roster.replaceChildren();
@@ -471,6 +566,10 @@ document.querySelector('#teacher-login').addEventListener('submit', async (event
 
 document.querySelector('#logout').addEventListener('click', async () => {
   try {
+    if (currentRole !== 'teacher') {
+      answerDrafts.clear();
+      saveDrafts();
+    }
     await api('/api/session/logout', { method: 'POST', body: '{}' });
     window.location.reload();
   } catch (error) { showNotice(error.message, true); }

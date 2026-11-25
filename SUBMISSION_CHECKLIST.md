@@ -5,11 +5,11 @@
 ## GitHub
 
 - [ ] 組員確認最終分支與提交，依課程規定審查、推送及提交 GitHub 連結。
-- [ ] 從交付提交執行 `npm ci`、`npm test` 和 `npm start`。
+- [ ] 從交付提交執行 `npm ci`、`npm test`、`npm run test:stress` 和 `npm start`。
 - [ ] 確認 README、OpenSpec 規格及封存紀錄可查閱。
 - [ ] 確認 `credentials.json`、`.env`、`.quiz-data/` 與本機匯出資料未被追蹤，示範只使用虛構學號。
 - [ ] 用至少兩份不同配置的可編輯 Guided Notes 驗證雲端匯入及回填，檢查答案格以外的資料與格式。
-- [ ] 依驗收矩陣完成真實試算表驗證後，再同步規格並封存這次 OpenSpec change。
+- [ ] 依驗收矩陣通過必要驗證後，核對 OpenSpec 正式規格並封存 change。
 
 ## YouTube
 

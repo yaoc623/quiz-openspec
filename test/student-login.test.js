@@ -6,7 +6,7 @@ const path = require('node:path');
 const { once } = require('node:events');
 const { io } = require('socket.io-client');
 const { createQuizServer } = require('../src/server');
-const { login, teacherCookie, teacherOptions } = require('../test-support/login');
+const { login, teacherCookie, teacherOptions, trackActivity } = require('../test-support/login');
 
 async function launch(t, options = {}) {
   const service = createQuizServer({ ...teacherOptions, ...options });
@@ -28,7 +28,7 @@ async function launch(t, options = {}) {
     return { status: response.status, body: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   async function socket(cookie) {
-    const client = io(base, { forceNew: true, reconnection: false, extraHeaders: { cookie } });
+    const client = trackActivity(io(base, { forceNew: true, reconnection: false, extraHeaders: { cookie } }));
     clients.push(client);
     const [snapshot] = await once(client, 'state');
     return { client, snapshot };
@@ -58,6 +58,107 @@ test('教師帳密、角色 Cookie、教師與學生登出及連線失效', { ti
   assert.equal((await service.request('/api/groups', { groupCount: 2 }, teacher)).status, 403);
 });
 
+test('教師帳密缺漏提示設定，連續登入失敗限流', { timeout: 10000 }, async (t) => {
+  const unconfigured = await launch(t, { teacherPassword: '' });
+  const missing = await login(unconfigured.base, 'teacher', {});
+  assert.equal(missing.status, 503);
+  assert.match((await missing.json()).error, /TEACHER_PASSWORD/);
+  const service = await launch(t);
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal((await login(service.base, 'teacher', { username: 'test-teacher', password: 'wrong' })).status, 401);
+  }
+  const limited = await login(service.base, 'teacher', { username: 'test-teacher', password: 'wrong' });
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get('retry-after')) > 0);
+});
+
+test('重啟恢復已受理佇列、組別、截止與公布結果，舊活動資料隔離', { timeout: 10000 }, async (t) => {
+  const { QuizState } = require('../src/quiz-state');
+  const { createActivityStore } = require('../src/activity-store');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'quiz-activity-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const activityPath = path.join(directory, 'activity.json');
+  const now = 10000;
+  const saved = new QuizState({ now: () => now });
+  saved.setWorksheet({ questions: [{ number: '1', subquestions: [{}] }] });
+  saved.setTimerLimit(30);
+  saved.toggleQuestion('1', 'open');
+  saved.admit({
+    studentId: '000012', group: 1, questionNumber: '1', answers: ['已受理待判定'],
+    receivedAtMs: now, receivedAtNs: '100', orderNs: '50000000000'
+  });
+  createActivityStore(activityPath).save({ state: saved.snapshot(), groups: [['000012', 1]],
+    spreadsheetId: 'mock', lastOrderNs: '50000000000' });
+  const service = await launch(t, { activityPath, now: () => now + 1000 });
+  const student = await service.student('000012', 2);
+  assert.equal(student.body.identity.group, 1);
+  const { client, snapshot } = await service.socket(student.cookie);
+  assert.equal(snapshot.activityId, saved.activityId);
+  assert.equal(snapshot.questions[0].deadlineAt, 40000);
+  assert.deepEqual(snapshot.submissions[0].answers, ['已受理待判定']);
+  assert.equal(service.state.pending.length, 0);
+  assert.equal(service.state.submissions[0].receivedAtNs, '100');
+  const second = await service.student('000014', 1);
+  const peer = (await service.socket(second.cookie)).client;
+  const processed = once(peer, 'state');
+  assert.equal((await peer.emitWithAck('answer:submit', { questionNumber: '1', answers: ['重啟後'] })).ok, true);
+  await processed;
+  assert.equal(service.state.submissions[1].sequence, 2);
+  assert.ok(BigInt(service.state.submissions[1].orderNs) > 50000000000n);
+  assert.equal(service.state.submissions[0].rank, 1);
+  const teacher = await teacherCookie(service.base);
+  await service.request('/api/phase/finish', { reveal: true }, teacher);
+  await service.request('/api/reveal/question/1', { visible: true }, teacher);
+  await service.io.close();
+  const restarted = await launch(t, { activityPath, now: () => now + 2000 });
+  const resumed = await restarted.student('000012');
+  assert.equal((await restarted.socket(resumed.cookie)).snapshot.winners[0].studentId, '000012');
+  const newTeacher = (await restarted.socket(await teacherCookie(restarted.base))).client;
+  const oldStudent = (await restarted.socket(resumed.cookie)).client;
+  assert.equal((await newTeacher.emitWithAck('activity:new', {})).ok, true);
+  const rejoined = await restarted.student('000012', 2);
+  const current = (await restarted.socket(rejoined.cookie)).client;
+  assert.equal((await current.emitWithAck('answer:submit', { activityId: saved.activityId, questionNumber: '1', answers: ['舊活動'] })).status, '已截止');
+  assert.equal(restarted.state.receipts.length, 0);
+  oldStudent.close();
+  client.close();
+});
+
+test('未計入鎖定原始提交，教師作答以 300 毫秒彙整且不漏尾筆', { timeout: 10000 }, async (t) => {
+  const service = await launch(t);
+  service.state.setWorksheet({ questions: [{ number: '1', subquestions: [{}, {}] }, { number: '2', subquestions: [{}] }] });
+  const teacher = await teacherCookie(service.base);
+  const teacherClient = (await service.socket(teacher)).client;
+  const first = (await service.socket((await service.student('000012', 1)).cookie)).client;
+  const second = (await service.socket((await service.student('000013', 1)).cookie)).client;
+  const open = once(teacherClient, 'state');
+  await service.request('/api/questions/1/open', {}, teacher);
+  await open;
+  const secondOpen = once(teacherClient, 'state');
+  await service.request('/api/questions/2/open', {}, teacher);
+  await secondOpen;
+  const invalid = new Promise((resolve) => {
+    first.on('answer:status', (status) => { if (status.status === '未計入') resolve(status); });
+  });
+  const pushed = once(teacherClient, 'state');
+  const started = performance.now();
+  const submit = (client, questionNumber, answers) => client.emitWithAck('answer:submit', { questionNumber, answers });
+  assert.equal((await submit(first, '1', ['少一題'])).status, '已送出');
+  assert.match((await invalid).error, /所有小題/);
+  assert.equal((await submit(first, '1', ['這', '是重送'])).status, '未計入');
+  await Promise.all([submit(first, '2', ['甲']), submit(second, '2', ['乙'])]);
+  const [snapshot] = await pushed;
+  assert.ok(performance.now() - started >= 190);
+  assert.deepEqual(snapshot.submissions.map(({ studentId }) => studentId).sort(), ['000012', '000013']);
+  assert.ok(snapshot.submissions.every(({ confirmed }) => !confirmed));
+  assert.equal(snapshot.leaderboard[0].score, 0);
+  const closed = once(teacherClient, 'state');
+  await service.request('/api/questions/2/close', {}, teacher);
+  const [confirmed] = await closed;
+  assert.ok(confirmed.submissions.every(({ confirmed }) => confirmed));
+  assert.equal(confirmed.leaderboard[0].score, 1);
+});
+
 test('首次選組、重登沿用組別、唯一學號及重啟保存', { timeout: 10000 }, async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'quiz-students-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -80,7 +181,7 @@ test('首次選組、重登沿用組別、唯一學號及重啟保存', { timeou
   assert.deepEqual(JSON.parse(fs.readFileSync(accountsPath)), ['000012']);
 });
 
-test('逐題開關與期限、跨連線併發、同組限制、重登恢復、結算及活動重設', { timeout: 10000 }, async (t) => {
+test('逐題開關與期限、跨連線併發、同組分別作答、重登恢復、結算及活動重設', { timeout: 10000 }, async (t) => {
   let now = 1000;
   const service = await launch(t, { now: () => now });
   service.state.setWorksheet({ questions: ['1', '2', '3'].map((number) => ({ number, subquestions: [{}] })) });
@@ -111,31 +212,33 @@ test('逐題開關與期限、跨連線併發、同組限制、重登恢復、�
   const ownUpdate = once(same, 'state');
   const teammateUpdate = once(teammate, 'state');
   const attempts = await Promise.all([submit(first, '1', '甲'), submit(same, '1', '乙')]);
-  assert.equal(attempts.filter((attempt) => attempt.ok).length, 1);
-  assert.deepEqual(attempts.find((attempt) => attempt.ok), { ok: true });
+  assert.equal(attempts.filter((attempt) => attempt.ok).length, 2);
+  assert.equal(service.state.receipts.filter((receipt) => receipt.studentId === '000012').length, 1);
   const own = (await ownUpdate)[0];
   assert.equal(own.submissions.length, 1);
   assert.equal(own.submissions[0].rank, undefined);
   assert.equal(own.winners, undefined);
   assert.deepEqual((await teammateUpdate)[0].submissions, []);
-  assert.equal((await submit(teammate, '1', '同組')).ok, false);
   assert.equal((await post('/api/groups/student', { studentId: '000012', group: 2 })).status, 400);
   assert.equal((await service.request('/api/groups/student', { studentId: '000013', group: 2 }, teammateLogin.cookie)).status, 403);
   assert.equal((await post('/api/groups/student', { studentId: '000013', group: 2 })).status, 200);
+  const sameGroupLogin = await service.student('000015', 1);
+  const sameGroup = (await service.socket(sameGroupLogin.cookie)).client;
+  assert.equal((await submit(sameGroup, '1', '同組另位')).ok, true);
   await service.request('/api/session/logout', {}, firstLogin.cookie);
   const returned = await service.student('000012');
   assert.deepEqual((await service.socket(returned.cookie)).snapshot.submissions, own.submissions);
   now = 11000;
   assert.equal((await submit(other, '1', '過期')).ok, false);
   assert.equal((await submit(other, '2', '還能作答')).ok, true);
-  assert.equal((await submit(other, '2', '重複')).ok, false);
+  assert.deepEqual((await submit(other, '2', '重複')).answers, ['還能作答']);
   const settled = once(other, 'state');
   await post('/api/phase/finish');
   const final = (await settled)[0];
   assert.deepEqual(final.winners.slice(0, 2).map(({ studentId, group }) => [studentId, group]), [['000012', 1], ['000014', 2]]);
   const csv = await service.request('/api/results.csv', undefined, teacher).then((r) => r.text());
-  assert.match(csv, /學號,審核狀態,是否獲勝/);
-  assert.match(csv, /000012,有效,是/);
+  assert.match(csv, /學號,組別,答案,延遲/);
+  assert.match(csv, /000012,1,.*?,1,是,否/);
   assert.deepEqual(await teacherClient.emitWithAck('activity:new', {}), { ok: true });
   assert.deepEqual((await service.student('000012')).body, { requiresGroup: true });
 });

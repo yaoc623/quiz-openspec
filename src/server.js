@@ -2,6 +2,7 @@ const path = require('node:path');
 const express = require('express');
 const http = require('node:http');
 const { Server } = require('socket.io');
+const { createActivityStore } = require('./activity-store');
 const { createIdentity } = require('./identity');
 const { QuizState } = require('./quiz-state');
 const { buildQuizCsv } = require('./csv-export');
@@ -14,15 +15,33 @@ function createQuizServer(options = {}) {
   const io = new Server(server, { allowRequest: (req, callback) => callback(null, sameOrigin(req.headers)) });
   const state = new QuizState({ now: options.now });
   const identity = createIdentity(options);
+  const store = createActivityStore(options.activityPath);
+  const restored = store.load();
+  if (restored) {
+    state.restore(restored.state);
+    for (const [studentId, group] of restored.groups) identity.groups.set(studentId, group);
+  }
   let worksheetGeneration = 0;
   const credentialsPath = options.credentialsPath ?? path.join(process.cwd(), 'credentials.json');
   const readCredentials = options.readCredentials ?? (() => loadCredentials(credentialsPath));
   const worksheetImporter = options.importWorksheet ?? importWorksheet;
   const sheetsClientFactory = options.createSheetsClient ?? createSheetsClient;
-  let currentSpreadsheetId = null;
+  let currentSpreadsheetId = restored?.spreadsheetId ?? null;
   let currentSheetsClient = null;
   let serviceAccountEmail = '';
   let writebackInProgress = false;
+  let writebackStatus = state.writebackCompleted ? '完成' : '';
+  let writebackError = '';
+  let answerTask = null;
+  let teacherPush = null;
+  const teacherPushMs = 300;
+  const loginFailures = new Map();
+  const monotonic = options.hrtime ?? (() => process.hrtime.bigint());
+  const startedNs = monotonic();
+  const startedAt = (options.now ?? Date.now)();
+  let lastOrderNs = BigInt(restored?.lastOrderNs ?? 0);
+  const wallEpochNs = BigInt(startedAt) * 1000000n;
+  const orderingEpochNs = wallEpochNs > lastOrderNs ? wallEpochNs : lastOrderNs + 1n;
   const writebackBusyMessage = '回填進行中，請等待完成後再操作。';
   const scheduleTimeout = options.setTimeout ?? setTimeout;
   const cancelTimeout = options.clearTimeout ?? clearTimeout;
@@ -45,18 +64,81 @@ function createQuizServer(options = {}) {
 
   function socketState(role, serverNow = now()) {
     const snapshot = state.publicState(role, serverNow);
-    if (role === 'teacher') snapshot.students = roster();
+    if (role === 'teacher') {
+      snapshot.students = roster();
+      snapshot.writebackStatus = writebackStatus;
+      snapshot.writebackError = writebackError;
+    }
     return snapshot;
   }
 
-  function sendState() {
+  function persist() {
+    store.save({ state: state.snapshot(), groups: [...identity.groups], spreadsheetId: currentSpreadsheetId, lastOrderNs: String(lastOrderNs) });
+  }
+
+  function sendState(audience) {
     const serverNow = now();
     for (const socket of io.sockets.sockets.values()) {
       const role = sessionRole(identity.get(socket.data.token));
-      if (role) socket.emit('state', socketState(role, serverNow));
-      else socket.disconnect(true);
+      if (!role) socket.disconnect(true);
+      else if (!audience || (audience === 'teacher') === (role === 'teacher')) socket.emit('state', socketState(role, serverNow));
     }
   }
+
+  function publish() {
+    persist();
+    if (teacherPush !== null) clearTimeout(teacherPush);
+    teacherPush = null;
+    sendState();
+  }
+
+  function queueTeacherPush() {
+    if (teacherPush !== null) return;
+    teacherPush = setTimeout(() => {
+      teacherPush = null;
+      sendState('teacher');
+    }, teacherPushMs);
+  }
+
+  function drainAnswers() {
+    if (answerTask !== null) clearImmediate(answerTask);
+    answerTask = null;
+    if (!state.pending.length) return;
+    const before = options.activityPath ? structuredClone(state.snapshot()) : null;
+    const processed = state.processPending();
+    try {
+      persist();
+    } catch (error) {
+      if (before) state.restore(before);
+      throw error;
+    }
+    for (const received of processed) {
+      const receipt = state.receipts.find(({ sequence }) => sequence === received.sequence);
+      for (const socket of io.sockets.sockets.values()) {
+        const session = identity.get(socket.data.token);
+        if (session?.studentId === receipt.studentId) socket.emit('answer:status', {
+          activityId: state.activityId, questionNumber: receipt.questionNumber,
+          answers: receipt.answers, status: receipt.status, error: receipt.error
+        });
+      }
+    }
+    sendState('student');
+    queueTeacherPush();
+  }
+
+  function scheduleAnswers() {
+    if (answerTask !== null) return;
+    answerTask = setImmediate(() => {
+      try { drainAnswers(); }
+      catch {
+        console.error('作答資料暫時無法寫入，將保留佇列等待重試。');
+        if (queueRetry !== null) clearTimeout(queueRetry);
+        queueRetry = setTimeout(() => { queueRetry = null; scheduleAnswers(); }, 1000);
+      }
+    });
+  }
+
+  let queueRetry = null;
 
   function revoke(req) {
     const token = identity.token(req.headers);
@@ -77,9 +159,25 @@ function createQuizServer(options = {}) {
   });
 
   app.post('/api/session/teacher', (req, res) => {
-    if (!identity.verifyTeacher(req.body.username, req.body.password)) {
-      return res.status(401).json({ error: '教師帳號或密碼錯誤，或尚未設定。' });
+    if (!options.teacherUsername || !options.teacherPassword) {
+      return res.status(503).json({ error: '請先在 .env 設定 TEACHER_USERNAME 與 TEACHER_PASSWORD，再重新啟動。' });
     }
+    const source = req.ip;
+    const time = Date.now();
+    for (const [ip, failure] of loginFailures) {
+      if (failure.until <= time) loginFailures.delete(ip);
+    }
+    const failure = loginFailures.get(source) ?? { count: 0, until: time + 60000 };
+    if (failure.count >= 5) {
+      res.set('Retry-After', String(Math.ceil((failure.until - time) / 1000)));
+      return res.status(429).json({ error: '教師登入失敗次數過多，請稍後再試。' });
+    }
+    if (!identity.verifyTeacher(req.body?.username, req.body?.password)) {
+      failure.count += 1;
+      loginFailures.set(source, failure);
+      return res.status(401).json({ error: '教師帳號或密碼錯誤。' });
+    }
+    loginFailures.delete(source);
     revoke(req);
     identity.issue(res, { role: 'teacher' });
     res.json({ identity: 'teacher' });
@@ -96,6 +194,8 @@ function createQuizServer(options = {}) {
         if (!Number.isInteger(group) || group < 1 || group > state.groupCount) throw new Error('組別無效。');
         identity.addAccount(studentId);
         identity.groups.set(studentId, group);
+        try { persist(); }
+        catch (error) { identity.groups.delete(studentId); throw error; }
       }
       revoke(req);
       identity.issue(res, { role: 'student', studentId });
@@ -125,10 +225,14 @@ function createQuizServer(options = {}) {
   function scheduleDeadline() {
     clearDeadlineTimer();
     const serverNow = now();
-    if (state.expireQuestions(serverNow)) sendState();
+    let changed = state.expireQuestions(serverNow);
     if (state.isExpired(serverNow)) {
       state.finish(serverNow, true);
-      sendState();
+      changed = true;
+    }
+    if (changed) {
+      drainAnswers();
+      publish();
     }
     const deadline = state.nextDeadline();
     if (deadline === null) return;
@@ -141,7 +245,12 @@ function createQuizServer(options = {}) {
     }, Math.min(remaining, 2_147_483_647));
   }
 
-  server.on('close', clearDeadlineTimer);
+  server.on('close', () => {
+    clearDeadlineTimer();
+    if (answerTask !== null) clearImmediate(answerTask);
+    if (teacherPush !== null) clearTimeout(teacherPush);
+    if (queueRetry !== null) clearTimeout(queueRetry);
+  });
 
   function asyncRoute(handler) {
     return (req, res) => Promise.resolve(handler(req, res)).catch((error) => {
@@ -172,7 +281,7 @@ function createQuizServer(options = {}) {
   app.post('/api/timer', requireTeacher, (req, res) => {
     try {
       state.setTimerLimit(req.body.limitSeconds);
-      sendState();
+      publish();
       res.json({ timer: state.timerSnapshot() });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -180,7 +289,7 @@ function createQuizServer(options = {}) {
   app.post('/api/fair-mode', requireTeacher, (req, res) => {
     try {
       state.setFairMode(req.body.enabled, Number(req.body.delaySeconds));
-      sendState();
+      publish();
       res.json({ fairModeEnabled: state.fairModeEnabled, fairDelaySeconds: state.fairDelaySeconds });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -190,7 +299,7 @@ function createQuizServer(options = {}) {
       const count = Number(req.body.groupCount);
       if ([...identity.groups.values()].some((group) => group > count)) throw new Error('請先調整超出組數的學生組別。');
       state.setGroupCount(count);
-      sendState();
+      publish();
       res.json({ groupCount: state.groupCount });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -201,11 +310,11 @@ function createQuizServer(options = {}) {
       const group = req.body.group;
       if (!identity.groups.has(id)) throw new Error('找不到本輪學生。');
       if (!Number.isInteger(group) || group < 1 || group > state.groupCount) throw new Error('組別無效。');
-      if (state.phase === '已結束' || state.submissions.some((entry) => entry.studentId === id)) {
+      if (state.phase === '已結束' || state.receipts.some((entry) => entry.studentId === id)) {
         throw new Error('學生已作答或活動已結束，無法換組。');
       }
       identity.groups.set(id, group);
-      sendState();
+      publish();
       res.json({ ok: true });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -213,8 +322,9 @@ function createQuizServer(options = {}) {
   app.post('/api/questions/:number/:action', requireTeacher, (req, res) => {
     try {
       state.toggleQuestion(req.params.number, req.params.action);
+      if (req.params.action === 'close') drainAnswers();
       scheduleDeadline();
-      sendState();
+      publish();
       res.json({ ok: true });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -235,7 +345,7 @@ function createQuizServer(options = {}) {
     try {
       state.start(req.body);
       scheduleDeadline();
-      sendState();
+      publish();
       res.json({ phase: state.phase, timer: state.timerSnapshot() });
     }
     catch (error) { res.status(400).json({ error: error.message }); }
@@ -245,7 +355,7 @@ function createQuizServer(options = {}) {
     try {
       state.openNextQuestion();
       scheduleDeadline();
-      sendState();
+      publish();
       res.json({ phase: state.phase, timer: state.timerSnapshot() });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -253,8 +363,9 @@ function createQuizServer(options = {}) {
   app.post('/api/phase/finish', requireTeacher, (req, res) => {
     try {
       state.finish(undefined, req.body?.reveal === true);
+      drainAnswers();
       scheduleDeadline();
-      sendState();
+      publish();
       res.json({ phase: state.phase });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -262,8 +373,17 @@ function createQuizServer(options = {}) {
   app.post('/api/reveal', requireTeacher, (req, res) => {
     try {
       state.setRevealIndex(Number(req.body.index));
-      sendState();
+      publish();
       res.json({ revealIndex: state.revealIndex });
+    } catch (error) { res.status(400).json({ error: error.message }); }
+  });
+
+  app.post('/api/reveal/question/:number', requireTeacher, (req, res) => {
+    try {
+      if (typeof req.body.visible !== 'boolean') throw new Error('請指定是否公布。');
+      state.revealQuestion(req.params.number, req.body.visible);
+      publish();
+      res.json({ ok: true });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
 
@@ -271,7 +391,9 @@ function createQuizServer(options = {}) {
     if (writebackInProgress) return res.status(409).json({ error: writebackBusyMessage });
     try {
       const entry = state.reviewSubmission(req.params.sequence, true);
-      sendState();
+      writebackStatus = '';
+      writebackError = '';
+      publish();
       res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -280,7 +402,9 @@ function createQuizServer(options = {}) {
     if (writebackInProgress) return res.status(409).json({ error: writebackBusyMessage });
     try {
       const entry = state.reviewSubmission(req.params.sequence, false);
-      sendState();
+      writebackStatus = '';
+      writebackError = '';
+      publish();
       res.json({ ok: true, entry: { sequence: entry.sequence, rank: entry.rank } });
     } catch (error) { res.status(400).json({ error: error.message }); }
   });
@@ -301,13 +425,27 @@ function createQuizServer(options = {}) {
     if (state.phase !== '已結束') throw new Error('活動結束後才能回寫答案。');
     if (!currentSpreadsheetId || !state.worksheet) throw new Error('尚未匯入學習單。');
     writebackInProgress = true;
+    writebackStatus = '寫入中';
+    writebackError = '';
+    sendState('teacher');
     try {
       if (!currentSheetsClient) currentSheetsClient = await sheetsClientFactory(readCredentials());
-      const result = await writeWinningAnswers(currentSheetsClient, currentSpreadsheetId, state.worksheet.questions, state.submissions);
+      const result = await writeWinningAnswers(currentSheetsClient, currentSpreadsheetId, state.worksheet.questions, state.submissions, {
+        retry: options.retrySheets
+      });
       state.markWritebackCompleted();
+      writebackStatus = '完成';
+      persist();
       res.json({ message: `回寫完成，共更新 ${result.updatedCells} 個儲存格。`, ...result });
+    } catch (error) {
+      writebackStatus = '失敗';
+      const status = Number(error.response?.status ?? error.status ?? error.code);
+      writebackError = Number.isInteger(status) ? `Google Sheets 回填失敗（代碼 ${status}），請檢查權限後重新寫入。`
+        : 'Google 試算表操作失敗，請確認憑證、連線及編輯權限後重新寫入。';
+      return res.status(400).json({ error: writebackError });
     } finally {
       writebackInProgress = false;
+      sendState('teacher');
     }
   }));
 
@@ -332,31 +470,60 @@ function createQuizServer(options = {}) {
         clearDeadlineTimer();
         currentSpreadsheetId = null;
         currentSheetsClient = null;
-        sendState();
+        writebackStatus = '';
+        writebackError = '';
+        publish();
         acknowledge({ ok: true });
       } catch (error) {
         acknowledge({ ok: false, error: error.message });
       }
     });
-    socket.on('answer:submit', (payload, acknowledge = () => {}) => {
+    socket.on('answer:submit', (payload, acknowledge) => {
+      const received = monotonic();
+      const receivedAtMs = now();
+      if (typeof acknowledge !== 'function') acknowledge = () => {};
+      const student = sessionRole(identity.get(socket.data.token));
+      if (!student?.group) return acknowledge({ ok: false, status: '已截止', error: '請先以有效學生組別登入。' });
+      if (payload?.activityId !== state.activityId) return acknowledge({ ok: false, status: '已截止', error: '此活動已更換。' });
+      const projected = orderingEpochNs + received - startedNs;
+      lastOrderNs = projected > lastOrderNs ? projected : lastOrderNs + 1n;
+      const expired = state.isExpired(receivedAtMs);
+      const outcome = state.admit({
+        ...student, questionNumber: String(payload?.questionNumber ?? ''), answers: payload?.answers ?? null,
+        receivedAtMs, receivedAtNs: String(received), orderNs: String(lastOrderNs)
+      });
+      if (outcome.previous) return acknowledge({ ok: true, status: outcome.previous.status, error: outcome.previous.error, answers: outcome.previous.answers });
+      if (outcome.closed) {
+        acknowledge({ ok: false, status: '已截止', error: expired ? '搶答時間已到，無法提交答案。' : '此題目前未開放作答。' });
+        if (expired || state.expireQuestions(receivedAtMs)) {
+          drainAnswers();
+          scheduleDeadline();
+          publish();
+        }
+        return;
+      }
       try {
-        const student = sessionRole(identity.get(socket.data.token));
-        if (!student?.group) throw new Error('請先以有效學生組別登入。');
-        const receivedAt = now();
-        if (state.isExpired(receivedAt)) {
-          scheduleDeadline();
-          throw new Error('搶答時間已到，無法提交答案。');
-        }
-        if (state.expireQuestions(receivedAt)) {
-          scheduleDeadline();
-          sendState();
-        }
-        state.submit(student.group, payload?.questionNumber, payload?.answers, receivedAt, student.studentId);
-        acknowledge({ ok: true });
-        sendState();
-      } catch (error) { acknowledge({ ok: false, error: error.message }); }
+        persist();
+      } catch {
+        state.receipts.pop();
+        state.pending.pop();
+        return acknowledge({ retry: true });
+      }
+      acknowledge({ ok: true, status: '已送出' });
+      for (const peer of io.sockets.sockets.values()) {
+        if (identity.get(peer.data.token)?.studentId === student.studentId) peer.emit('answer:status', {
+          activityId: state.activityId, questionNumber: outcome.receipt.questionNumber,
+          answers: outcome.receipt.answers, status: outcome.receipt.status
+        });
+      }
+      scheduleAnswers();
     });
   });
+
+  if (restored) {
+    drainAnswers();
+    scheduleDeadline();
+  }
 
   return { app, server, io, state };
 }
@@ -366,9 +533,10 @@ if (require.main === module) {
   if (require('node:fs').existsSync(environmentPath)) process.loadEnvFile(environmentPath);
 }
 const { app, server, io, state } = createQuizServer(require.main === module ? {
+  activityPath: path.join(process.cwd(), '.quiz-data', 'activity.json'),
   accountsPath: path.join(process.cwd(), '.quiz-data', 'students.json'),
-  teacherUsername: process.env.QUIZ_TEACHER_USERNAME,
-  teacherPassword: process.env.QUIZ_TEACHER_PASSWORD
+  teacherUsername: process.env.TEACHER_USERNAME,
+  teacherPassword: process.env.TEACHER_PASSWORD
 } : {});
 const port = Number(process.env.PORT) || 3000;
 if (require.main === module) {

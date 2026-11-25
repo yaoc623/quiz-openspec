@@ -201,7 +201,7 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const twoSecond = nextEvent(teamTwo, 'state');
     const oneSecond = nextEvent(teamOne, 'state');
     const second = await new Promise((resolve) => teamTwo.emit('answer:submit', { questionNumber: '1', answers: ['二甲', '二乙'] }, resolve));
-    assert.deepEqual(second, { ok: true });
+    assert.deepEqual(second, { ok: true, status: '已送出' });
     const [teacherAfterSecond] = await Promise.all([teacherSecond, twoSecond, oneSecond]);
     assert.equal(teacherAfterSecond.submissions[1].rank, 2);
 
@@ -471,9 +471,8 @@ test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 
     const bytes = Buffer.from(await response.arrayBuffer());
     assert.deepEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
     const content = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
-    assert.match(content, /1,,1,"答案,""含引號"""/);
-    assert.match(content, /1,,2,,,,,未作答,否/);
-    assert.match(content, /2,b,2,題組乙/);
+    assert.match(content, /1,1,.*?,1,1,"答案,""含引號"""/);
+    assert.match(content, /2,2,.*?,2,2,.*題組甲.*題組乙/);
   } finally { await new Promise((resolve) => service.io.close(resolve)); }
 });
 

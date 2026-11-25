@@ -39,7 +39,7 @@ test('題目載入後開始、結束及錯誤階段轉換', () => {
   assert.throws(() => state.finish(), /不是搶答階段/);
 });
 
-test('只在搶答中接受完整答案並限制同組同題只能提交一次', () => {
+test('只在搶答中接受完整答案並限制同學號同題只能提交一次', () => {
   const state = new QuizState();
   state.setWorksheet(worksheet());
   assert.throws(() => state.submit(1, '1', ['a', 'b']), /不是搶答階段/);
@@ -74,7 +74,7 @@ test('搶答中學生只看自己組別答案，結束後只收到得勝組結�
   assert.equal(teacher.submissions.length, 2);
   state.finish();
   const result = state.publicState({ group: 2 });
-  assert.deepEqual(result.winners[0], { questionNumber: '1', group: 1, answers: ['秘密甲', '秘密乙'] });
+  assert.deepEqual(result.winners[0], { questionNumber: '1', group: 1, studentId: '1', answers: ['秘密甲', '秘密乙'] });
 });
 
 test('匯入活動只公開題號與小題標記，不包含題目文字或答案目標', () => {
@@ -150,15 +150,14 @@ test('排行榜每題計一分並依實際送出總時間及組別排序', () =>
   now = 3000; state.submit(1, '1', ['一甲', '一乙']);
   now = 5000; state.submit(1, '2', ['一題']);
   now = 6000; state.submit(3, '2', ['三題']);
+  assert.ok(state.leaderboard().every(({ score }) => score === 0));
+  state.finish();
   assert.deepEqual(state.leaderboard(), [
     { group: 2, score: 1, totalSubmissionTimeMs: 1000 },
     { group: 1, score: 1, totalSubmissionTimeMs: 6000 },
     { group: 3, score: 0, totalSubmissionTimeMs: 5000 }
   ]);
-  const student = state.publicState({ group: 1 });
-  assert.equal('leaderboard' in student, false);
   assert.ok(state.publicState('teacher').leaderboard);
-  state.finish();
   assert.deepEqual(state.publicState({ group: 1 }).leaderboard, state.leaderboard());
 });
 
@@ -172,9 +171,11 @@ test('公平模式保存正整數延遲，依送出當下成功題數加權判�
   assert.throws(() => state.setFairMode('true', 3), /開啟或關閉/);
   state.setFairMode(true, 3);
   state.setWorksheet(worksheet());
-  state.start();
+  state.toggleQuestion('1', 'open');
   now += 1000;
   const first = state.submit(1, '1', ['一甲', '一乙']);
+  state.toggleQuestion('1', 'close');
+  state.toggleQuestion('2', 'open');
   now += 1000;
   state.submit(1, '2', ['一題']);
   now += 500;
@@ -219,6 +220,7 @@ test('老師駁回成功答案會依原順位遞補，取消駁回可恢復且�
   assert.equal(state.reviewSubmission(first.sequence, true).rejected, true);
   assert.equal(first.rank, null);
   assert.equal(second.rank, 1);
+  state.finish();
   assert.equal(state.leaderboard().find((row) => row.group === 2).score, 1);
   assert.equal(state.publicState('teacher').submissions.find((entry) => entry.sequence === first.sequence).successful, false);
   assert.equal(state.publicState('teacher').submissions.find((entry) => entry.sequence === first.sequence).rejected, true);

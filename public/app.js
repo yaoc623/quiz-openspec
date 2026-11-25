@@ -89,7 +89,7 @@ function updateGroupOptions(count) {
 
 function updateIdentity() {
   document.querySelector('#identity').textContent = currentRole === 'teacher' ? '老師'
-    : `學號 ${currentRole.studentId}｜${currentRole.group ? `第 ${currentRole.group} 組` : '尚未選組'}`;
+    : `${currentRole.group ? `第 ${currentRole.group} 組` : '尚未選組'}｜${currentRole.studentId}`;
 }
 
 async function connect(identity) {
@@ -170,6 +170,7 @@ async function connect(identity) {
 function createQuestionCard(question, canAnswer) {
   const card = document.createElement('article');
   card.className = 'question';
+  card.dataset.questionNumber = question.number;
   const title = document.createElement('h3');
   title.textContent = `第 ${question.number} 題`;
   card.append(title);
@@ -301,6 +302,9 @@ function renderState(value) {
     const fairStatus = document.querySelector('#fair-mode-status');
     fairStatus.textContent = '公平模式已開啟';
     fairStatus.classList.toggle('hidden', !value.fairModeEnabled);
+    const activeInput = document.activeElement;
+    const activeQuestion = activeInput?.dataset?.answerIndex !== undefined
+      ? activeInput.closest('.question')?.dataset.questionNumber : undefined;
     studentWork.replaceChildren();
     answerList.replaceChildren();
     if (value.phase !== '已結束' || answerStatuses.size || value.submissions?.length) {
@@ -324,6 +328,13 @@ function renderState(value) {
           card.append(done);
         }
         studentWork.append(card);
+        if (activeQuestion === question.number) {
+          const replacement = card.querySelectorAll('input')[Number(activeInput.dataset.answerIndex)];
+          if (replacement && !replacement.disabled) {
+            replacement.focus({ preventScroll: true });
+            replacement.setSelectionRange(activeInput.selectionStart, activeInput.selectionEnd);
+          }
+        }
       });
       if (value.phase === '準備中' || (value.independentQuestions && !value.questions.some((question) => question.open) && value.phase !== '已結束')) {
         const waiting = document.createElement('p');

@@ -206,6 +206,7 @@ class QuizState {
 
   restore(data) {
     Object.assign(this, data, { questionWindows: new Map(data.questionWindows) });
+    for (const entry of [...this.receipts, ...this.pending, ...this.submissions]) entry.activityId ??= this.activityId;
   }
 
   questionIsOpen(number) {
@@ -229,7 +230,9 @@ class QuizState {
   }
 
   admit({ group, studentId, questionNumber, answers, receivedAtMs, receivedAtNs, orderNs }) {
-    const previous = this.receipts.find((item) => item.studentId === studentId && item.questionNumber === questionNumber);
+    if (typeof studentId !== 'string' || !/^[0-9]{1,32}$/.test(studentId)) throw new Error('需要有效的登入學號。');
+    const previous = this.receipts.find((item) => item.activityId === this.activityId &&
+      item.studentId === studentId && item.questionNumber === questionNumber);
     if (previous) {
       return { previous };
     }
@@ -242,7 +245,7 @@ class QuizState {
       item.rank === 1 && this.isConfirmed(item.questionNumber)).length;
     const penaltySeconds = this.fairModeEnabled ? successfulCountAtSubmission * this.fairDelaySeconds : 0;
     const receipt = {
-      studentId, group, questionNumber, answers, sequence, receivedAtMs, receivedAtNs, orderNs,
+      activityId: this.activityId, studentId, group, questionNumber, answers, sequence, receivedAtMs, receivedAtNs, orderNs,
       successfulCountAtSubmission, penaltySeconds, status: '已送出'
     };
     this.receipts.push(receipt);
@@ -272,20 +275,6 @@ class QuizState {
     }
     for (const number of affected) this.recalculateRanks(number);
     return processed;
-  }
-
-  submit(group, questionNumber, answers, receivedAtMs = this.now(), studentId = String(group)) {
-    const number = String(questionNumber);
-    if (this.phase !== '搶答中') throw new Error('目前不是搶答階段，無法提交答案。');
-    if (this.isExpired(receivedAtMs)) throw new Error('搶答時間已到，無法提交答案。');
-    const error = this.answerError(group, number, answers);
-    if (error) throw new Error(error);
-    const orderNs = String(BigInt(receivedAtMs) * 1000000n);
-    const outcome = this.admit({ group, studentId, questionNumber: number, answers, receivedAtMs, receivedAtNs: orderNs, orderNs });
-    if (outcome.previous) throw new Error('此學生已提交此題，不能重複提交。');
-    if (outcome.closed) throw new Error('此題目前未開放作答。');
-    this.processPending();
-    return this.submissions.find((entry) => entry.sequence === outcome.receipt.sequence);
   }
 
   recalculateRanks(questionNumber) {
@@ -333,7 +322,7 @@ class QuizState {
       if (winner && this.isConfirmed(question.number)) rows[winner.group - 1].score += 1;
     }
     for (const entry of this.submissions) {
-      if (this.roundStartedAt !== null) rows[entry.group - 1].totalSubmissionTimeMs += Math.max(0, entry.receivedAtMs - this.roundStartedAt);
+      if (!entry.rejected && this.roundStartedAt !== null) rows[entry.group - 1].totalSubmissionTimeMs += Math.max(0, entry.receivedAtMs - this.roundStartedAt);
     }
     return rows.sort((a, b) => b.score - a.score || a.totalSubmissionTimeMs - b.totalSubmissionTimeMs || a.group - b.group);
   }
@@ -356,11 +345,10 @@ class QuizState {
     if (role === 'teacher') return { ...base, fairDelaySeconds: this.fairDelaySeconds, submissions: this.submissions.map((entry) => ({ ...entry, successful: entry.rank === 1 && !entry.rejected, confirmed: this.isConfirmed(entry.questionNumber) })), leaderboard: this.leaderboard() };
     const group = role?.group;
     const studentId = role?.studentId;
-    if (studentId) {
-      base.identity = { studentId, group };
-      base.submissions = this.receipts.filter((entry) => entry.studentId === studentId)
-        .map(({ group, questionNumber, answers, status, error }) => ({ group, questionNumber, answers, status, error }));
-    }
+    if (!studentId) return base;
+    base.identity = { studentId, group };
+    base.submissions = this.receipts.filter((entry) => entry.activityId === this.activityId && entry.studentId === studentId)
+      .map(({ group, questionNumber, answers, status, error }) => ({ group, questionNumber, answers, status, error }));
     if (this.phase === '已結束') {
       const winners = this.worksheet?.questions.map((question) => {
         const winner = this.submissions.find((item) => item.questionNumber === question.number && item.rank === 1 && !item.rejected);
@@ -375,8 +363,7 @@ class QuizState {
       return { ...base, winners: visibleWinners, rejectedSubmissions: rejectedSubmissions.filter((entry) =>
         visibleNumbers.has(entry.questionNumber)), leaderboard: allRevealed ? this.leaderboard() : undefined };
     }
-    if (studentId) return base;
-    return { ...base, submissions: this.submissions.filter((entry) => entry.group === group).map(({ group: entryGroup, questionNumber, answers, receivedAt, rejected }) => ({ group: entryGroup, questionNumber, answers: [...answers], receivedAt, rejected })) };
+    return base;
   }
 }
 

@@ -242,3 +242,73 @@ test('逐題開關與期限、跨連線併發、同組分別作答、重登恢�
   assert.deepEqual(await teacherClient.emitWithAck('activity:new', {}), { ok: true });
   assert.deepEqual((await service.student('000012')).body, { requiresGroup: true });
 });
+test('同組三人各自作答，題組一分，逐人遞補與恢復同步至揭曉、CSV 和 Sheets', { timeout: 10000 }, async (t) => {
+  const writes = [];
+  const questions = [
+    { number: '1', subquestions: [
+      { label: 'a', target: { sheet: '測試', column: 4, row: 2 } },
+      { label: 'b', target: { sheet: '測試', column: 4, row: 3 } }
+    ] },
+    { number: '2', subquestions: [{ target: { sheet: '測試', column: 4, row: 4 } }] }
+  ];
+  const service = await launch(t, {
+    readCredentials: () => ({}),
+    importWorksheet: async () => ({ spreadsheetId: 'mock', parsed: { sheet: '測試', questions } }),
+    createSheetsClient: async () => ({ spreadsheets: { values: {
+      batchUpdate: async ({ requestBody }) => { writes.push(requestBody.data); return { data: {} }; }
+    } } })
+  });
+  const teacher = await teacherCookie(service.base);
+  const post = async (url, data = {}) => assert.equal((await service.request(url, data, teacher)).status, 200, url);
+  await post('/api/worksheet/import');
+  await post('/api/fair-mode', { enabled: true, delaySeconds: 3 });
+  const clients = [];
+  for (let index = 0; index < 4; index += 1) {
+    clients.push((await service.socket((await service.student(String(980001 + index), index === 3 ? 2 : 1)).cookie)).client);
+  }
+  const submit = async (client, number, answers) => {
+    const updated = once(client, 'state');
+    assert.equal((await client.emitWithAck('answer:submit', { questionNumber: number, answers })).status, '已送出');
+    await updated;
+  };
+  await post('/api/questions/1/open');
+  for (const [i, client] of clients.entries()) await submit(client, '1', [`甲-${i}`, `乙-${i}`]);
+  const first = service.state.submissions.slice();
+  assert.deepEqual(first.map(({ studentId, rank }) => [studentId, rank]), [['980001', 1], ['980002', 2], ['980003', 3], ['980004', 4]]);
+  assert.equal(service.state.leaderboard()[0].score, 0);
+  await post('/api/questions/1/close');
+  const score = () => service.state.leaderboard().filter(({ score }) => score > 0).map(({ group, score }) => [group, score]);
+  assert.deepEqual(score(), [[1, 1]]);
+  await post('/api/questions/2/open');
+  await submit(clients[0], '2', ['延遲甲']);
+  await submit(clients[1], '2', ['延遲乙']);
+  const fixed = service.state.submissions.slice(4);
+  assert.deepEqual(fixed.map(({ penaltySeconds }) => penaltySeconds), [3, 3]);
+  await post('/api/submissions/' + first[0].sequence + '/reject');
+  assert.equal(first[1].rank, 1);
+  assert.deepEqual(score(), [[1, 1]]);
+  await post('/api/submissions/' + first[1].sequence + '/reject');
+  await post('/api/submissions/' + first[2].sequence + '/reject');
+  assert.equal(first[3].rank, 1);
+  assert.deepEqual(score(), [[2, 1]]);
+  assert.deepEqual(fixed.map(({ penaltySeconds }) => penaltySeconds), [3, 3]);
+  await post('/api/phase/finish', { reveal: true });
+  assert.equal(service.state.publicState({ studentId: '980004', group: 2 }).leaderboard, undefined);
+  await post('/api/reveal/question/1', { visible: true });
+  const verify = async (winner, index) => {
+    const visible = service.state.publicState({ studentId: '980004', group: 2 });
+    assert.equal(visible.winners[0].studentId, winner);
+    assert.equal(visible.winners.length, 1);
+    assert.equal(visible.leaderboard, undefined);
+    const csv = await service.request('/api/results.csv', undefined, teacher).then((response) => response.text());
+    assert.equal(csv.split('\r\n').filter((row) => /^1,.*?,1,是,否$/.test(row)).length, 1);
+    assert.match(csv, new RegExp('^1,.*,' + winner + ',.*?,1,是,否$', 'm'));
+    await post('/api/worksheet/writeback');
+    assert.deepEqual(writes.at(-1).slice(0, 2).map((entry) => entry.values[0][0]), [`甲-${index}`, `乙-${index}`]);
+  };
+  await verify('980004', 3);
+  await post('/api/submissions/' + first[0].sequence + '/restore');
+  assert.equal(first[0].rank, 1);
+  assert.deepEqual(score(), [[1, 2]]);
+  await verify('980001', 0);
+});

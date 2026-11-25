@@ -166,15 +166,17 @@ test('自訂 10 秒可直接開始，倒數不因同輪推送延長', async () =
   assert.equal(display.textContent, '00:00');
 });
 
-test('同輪推送保留題組草稿，換輪使用相同題號仍清空', async () => {
+test('同輪推送保留身分、題組草稿及送出權限，換輪仍清空舊草稿', async () => {
   const client = bootClient();
   await flushInitialization();
   client.join();
   const socket = client.sockets[0];
   const state = { activityId: 'first', phase: '搶答中', groupCount: 4,
+    identity: { studentId: '000012', group: 2 },
     questions: [{ number: '1', subquestions: [{ label: 'a' }, { label: 'b' }] }], submissions: [] };
   const inputs = () => client.elements.get('student-work').children[0].children.filter((child) => child.type === 'text');
   socket.receive('state', state);
+  assert.equal(client.elements.get('identity').textContent, '第 2 組｜000012');
   const [first, second] = inputs();
   first.value = '甲';
   first.handlers.input();
@@ -182,8 +184,11 @@ test('同輪推送保留題組草稿，換輪使用相同題號仍清空', async
   second.handlers.input();
   socket.receive('state', { ...state });
   assert.deepEqual(inputs().map((input) => input.value), ['甲', '乙']);
+  assert.ok(inputs().every((input) => !input.disabled));
+  assert.equal(client.elements.get('student-work').children[0].querySelector('button').disabled, false);
   socket.receive('state', { ...state, activityId: 'second' });
   assert.deepEqual(inputs().map((input) => input.value), ['', '']);
+  assert.equal(client.elements.get('identity').textContent, '第 2 組｜000012');
 });
 
 test('老師的新活動按鈕只在已結束顯示，確認才送出且新狀態清空畫面', async () => {

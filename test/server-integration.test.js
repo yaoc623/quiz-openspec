@@ -1,3 +1,4 @@
+const { submitFixture } = require('../test-support/state-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { authenticatedClient: createClient, teacherCookie, teacherOptions } = require('../test-support/login');
@@ -419,8 +420,8 @@ test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP �
   const service = createQuizServer({ ...teacherOptions, readCredentials: () => ({ client_email: 'quiz@example.test' }) });
   service.state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] });
   service.state.start();
-  const first = service.state.submit(1, '1', ['一組答案'], undefined, '900001');
-  service.state.submit(2, '1', ['二組答案']);
+  const first = submitFixture(service.state, 1, '1', ['一組答案'], undefined, '900001');
+  submitFixture(service.state, 2, '1', ['二組答案']);
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
   const clients = [];
@@ -454,8 +455,8 @@ test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 
   service.state.setGroupCount(2);
   service.state.setWorksheet({ questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{ label: 'a' }, { label: 'b' }] }] });
   service.state.start();
-  service.state.submit(1, '1', ['答案,"含引號"']);
-  service.state.submit(2, '2', ['題組甲', '題組乙']);
+  submitFixture(service.state, 1, '1', ['答案,"含引號"']);
+  submitFixture(service.state, 2, '2', ['題組甲', '題組乙']);
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
   try {
@@ -471,8 +472,8 @@ test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 
     const bytes = Buffer.from(await response.arrayBuffer());
     assert.deepEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
     const content = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
-    assert.match(content, /1,1,.*?,1,1,"答案,""含引號"""/);
-    assert.match(content, /2,2,.*?,2,2,.*題組甲.*題組乙/);
+    assert.match(content, /1,1,.*?,900001,1,"答案,""含引號"""/);
+    assert.match(content, /2,2,.*?,900002,2,.*題組甲.*題組乙/);
   } finally { await new Promise((resolve) => service.io.close(resolve)); }
 });
 
@@ -490,7 +491,7 @@ test('揭曉控制限教師，學生即時只收到已揭曉結果且重連取�
     const student = connect('student', 1);
     await Promise.all([nextEvent(teacher, 'state'), nextEvent(student, 'state')]);
     await request(base, '/api/worksheet/import', { url: 'mock-url' });
-    service.state.start(); service.state.submit(1, '1', ['已揭曉答案']); service.state.submit(1, '2', ['尚未揭曉答案']); service.state.finish();
+    service.state.start(); submitFixture(service.state, 1, '1', ['已揭曉答案']); submitFixture(service.state, 1, '2', ['尚未揭曉答案'], undefined, '900003'); service.state.finish();
     const initial = nextEvent(student, 'state');
     await request(base, '/api/reveal', { index: -1 });
     const hidden = await initial;

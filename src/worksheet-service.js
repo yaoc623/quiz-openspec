@@ -67,7 +67,7 @@ async function importWorksheet(url, options = {}) {
   return { spreadsheetId, parsed, serviceAccountEmail: credentials.client_email };
 }
 
-async function writeWinningAnswers(sheets, spreadsheetId, questions, submissions) {
+async function writeWinningAnswers(sheets, spreadsheetId, questions, submissions, { retry = {} } = {}) {
   const data = [];
   for (const question of questions) {
     const winner = submissions
@@ -79,11 +79,20 @@ async function writeWinningAnswers(sheets, spreadsheetId, questions, submissions
     });
   }
   if (!data.length) return { updatedCells: 0 };
-  const result = await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId,
-    requestBody: { valueInputOption: 'USER_ENTERED', data }
-  });
-  return { updatedCells: result.data.totalUpdatedCells ?? data.length };
+  const request = { spreadsheetId, requestBody: { valueInputOption: 'RAW', data } };
+  const wait = retry.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const result = await sheets.spreadsheets.values.batchUpdate(request, { retry: false });
+      return { updatedCells: result.data.totalUpdatedCells ?? data.length };
+    } catch (error) {
+      const status = Number(error.response?.status ?? error.status ?? error.code);
+      const transient = status === 429 || status >= 500 && status <= 599 ||
+        ['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN'].includes(error.code ?? error.cause?.code);
+      if (!transient || attempt >= 3) throw error;
+      await wait(250 * 2 ** attempt);
+    }
+  }
 }
 
 module.exports = { spreadsheetIdFromUrl, loadCredentials, columnName, targetA1, createSheetsClient, readWorksheetData, importWorksheet, writeWinningAnswers };

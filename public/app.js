@@ -1,4 +1,3 @@
-const roleSelect = document.querySelector('#role');
 const groupSelect = document.querySelector('#group');
 const entryCard = document.querySelector('#entry-card');
 const activityCard = document.querySelector('#activity-card');
@@ -13,6 +12,50 @@ let currentRole;
 let latestState;
 let groupCount = 4;
 const answerDrafts = new Map();
+const outgoingAnswers = new Map();
+const answerStatuses = new Map();
+
+function draftStorageKey() {
+  return `quiz-drafts:${latestState?.activityId}:${currentRole?.studentId}`;
+}
+
+function saveDrafts() {
+  try { globalThis.sessionStorage?.setItem(draftStorageKey(), JSON.stringify([...answerDrafts])); }
+  catch { /* 儲存空間不可用時仍保留目前畫面的草稿。 */ }
+}
+
+function restoreDrafts() {
+  try {
+    for (const [number, answers] of JSON.parse(globalThis.sessionStorage?.getItem(draftStorageKey()) ?? '[]')) {
+      answerDrafts.set(number, answers);
+    }
+  } catch { /* 無法讀取時以空白草稿開始。 */ }
+}
+
+function updateAnswerStatus(status) {
+  if (status.activityId !== latestState?.activityId) return;
+  const outgoing = outgoingAnswers.get(status.questionNumber);
+  if (outgoing) clearTimeout(outgoing.retryTimer);
+  outgoingAnswers.delete(status.questionNumber);
+  answerStatuses.set(status.questionNumber, status);
+  if (status.status !== '已截止') {
+    answerDrafts.delete(status.questionNumber);
+    saveDrafts();
+  }
+  renderState(latestState);
+}
+
+function sendAnswer(outgoing) {
+  const { payload } = outgoing;
+  if (outgoingAnswers.get(payload.questionNumber) !== outgoing || payload.activityId !== latestState?.activityId) return;
+  clearTimeout(outgoing.retryTimer);
+  outgoing.retryTimer = setTimeout(() => sendAnswer(outgoing), 2000);
+  if (!socket.connected) return;
+  socket.volatile.timeout(1800).emit('answer:submit', payload, (error, reply) => {
+    if (error || reply?.retry || outgoingAnswers.get(payload.questionNumber) !== outgoing) return;
+    updateAnswerStatus({ ...payload, ...reply, answers: reply.answers ?? payload.answers });
+  });
+}
 let timerAnchorRemaining = null;
 let timerAnchorClientTime = 0;
 let timerAnchorDeadline = null;
@@ -20,13 +63,13 @@ let timerAnchorActivity = null;
 let teacherRevealOpen = false;
 
 function showNotice(message, error = false) {
-  notice.textContent = message;
-  notice.style.color = error ? '#a33636' : '';
+  const target = currentRole ? notice : document.querySelector('#login-notice');
+  target.textContent = message;
+  target.style.color = error ? '#a33636' : '';
 }
 
 async function api(url, options = {}) {
-  const roleHeader = currentRole === 'teacher' ? { 'X-Quiz-Role': 'teacher' } : {};
-  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...roleHeader, ...(options.headers ?? {}) } });
+  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) } });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || '操作失敗，請稍後再試。');
   return result;
@@ -44,17 +87,54 @@ function updateGroupOptions(count) {
   document.querySelector('#group-count').value = String(count);
 }
 
-roleSelect.addEventListener('change', () => {
-  document.querySelector('label[for="group"]').classList.toggle('hidden', roleSelect.value === 'teacher');
-  groupSelect.classList.toggle('hidden', roleSelect.value === 'teacher');
-});
+function updateIdentity() {
+  document.querySelector('#identity').textContent = currentRole === 'teacher' ? '老師'
+    : `${currentRole.group ? `第 ${currentRole.group} 組` : '尚未選組'}｜${currentRole.studentId}`;
+}
 
-async function connect() {
-  currentRole = roleSelect.value === 'teacher' ? 'teacher' : { group: Number(groupSelect.value) };
-  socket = io({ auth: { role: typeof currentRole === 'string' ? currentRole : 'student', group: typeof currentRole === 'string' ? undefined : currentRole.group } });
-  socket.on('connect_error', (error) => showNotice(error.message, true));
+async function connect(identity) {
+  currentRole = identity;
+  if (identity !== 'teacher' && !identity.group) {
+    document.querySelector('#student-id').value = identity.studentId;
+    document.querySelector('#group-entry').classList.remove('hidden');
+    currentRole = null;
+    showNotice('新活動已開始，請選擇組別。');
+    return;
+  }
+  socket = io();
+  socket.on('connect_error', (error) => {
+    if (error.message === '請先登入。') window.location.reload();
+    else showNotice(error.message, true);
+  });
+  socket.on('disconnect', (reason) => {
+    if (reason === 'io server disconnect') window.location.reload();
+  });
+  socket.on('roster', (students) => {
+    if (currentRole !== 'teacher' || !latestState) return;
+    latestState.students = students;
+    renderTeacherControls(latestState);
+  });
+  socket.on('answer:status', updateAnswerStatus);
   socket.on('state', (value) => {
-    if (value.phase !== '搶答中' || value.activityId !== latestState?.activityId) answerDrafts.clear();
+    const newActivity = value.activityId !== latestState?.activityId;
+    if (newActivity) {
+      answerDrafts.clear();
+      answerStatuses.clear();
+      for (const outgoing of outgoingAnswers.values()) clearTimeout(outgoing.retryTimer);
+      outgoingAnswers.clear();
+    }
+    if (value.phase === '已結束') answerDrafts.clear();
+    if (value.identity) {
+      currentRole = value.identity;
+      if (!currentRole.group) {
+        socket.disconnect();
+        activityCard.classList.add('hidden');
+        entryCard.classList.remove('hidden');
+        connect(currentRole);
+        return;
+      }
+      updateIdentity();
+    }
     if (currentRole === 'teacher' && value.phase === '準備中' &&
       (value.activityId !== latestState?.activityId || !latestState)) {
       const limit = value.timer?.limitSeconds;
@@ -64,19 +144,33 @@ async function connect() {
       custom.value = choice === 'custom' ? String(limit) : '';
       custom.classList.toggle('hidden', choice !== 'custom');
       document.querySelector('#per-question').checked = false;
+      document.querySelector('#settle-hidden').checked = true;
     }
     latestState = value;
+    if (currentRole !== 'teacher') {
+      if (newActivity && value.phase !== '已結束') restoreDrafts();
+      for (const entry of value.submissions ?? []) {
+        answerStatuses.set(entry.questionNumber, entry);
+        const outgoing = outgoingAnswers.get(entry.questionNumber);
+        if (outgoing) clearTimeout(outgoing.retryTimer);
+        outgoingAnswers.delete(entry.questionNumber);
+        answerDrafts.delete(entry.questionNumber);
+      }
+      saveDrafts();
+    }
     renderState(value);
   });
   entryCard.classList.add('hidden');
   activityCard.classList.remove('hidden');
   teacherTools.classList.toggle('hidden', currentRole !== 'teacher');
-  document.querySelector('#identity').textContent = currentRole === 'teacher' ? '老師' : `第 ${currentRole.group} 組`;
+  updateIdentity();
+  if (currentRole === 'teacher') initializeInfo().catch((error) => showNotice(error.message, true));
 }
 
 function createQuestionCard(question, canAnswer) {
   const card = document.createElement('article');
   card.className = 'question';
+  card.dataset.questionNumber = question.number;
   const title = document.createElement('h3');
   title.textContent = `第 ${question.number} 題`;
   card.append(title);
@@ -87,26 +181,32 @@ function createQuestionCard(question, canAnswer) {
     input.type = 'text';
     input.dataset.answerIndex = String(index);
     input.autocomplete = 'off';
+    input.maxLength = 8000;
     input.value = answerDrafts.get(question.number)?.[index] ?? '';
     input.addEventListener('input', () => {
       const draft = answerDrafts.get(question.number) ?? [];
       draft[index] = input.value;
       answerDrafts.set(question.number, draft);
+      saveDrafts();
     });
     input.disabled = !canAnswer;
     card.append(label, input);
   });
   const button = document.createElement('button');
-  button.textContent = '提交本題答案';
+  button.textContent = '搶答！';
   button.disabled = !canAnswer;
   button.addEventListener('click', () => {
     const inputs = [...card.querySelectorAll('input')];
-    socket.emit('answer:submit', { questionNumber: question.number, answers: inputs.map((input) => input.value) }, (reply) => {
-      if (!reply.ok) return showNotice(reply.error, true);
-      inputs.forEach((input) => { input.disabled = true; });
-      button.disabled = true;
-      showNotice(`第 ${question.number} 題已提交，順位 ${reply.entry.rank}。`);
-    });
+    const answers = inputs.map((input) => input.value);
+    if (answers.some((answer) => !answer.trim())) return showNotice('請先填寫所有答案。', true);
+    const payload = { activityId: latestState.activityId, questionNumber: question.number, answers };
+    const outgoing = { payload, retryTimer: null };
+    outgoingAnswers.set(question.number, outgoing);
+    answerStatuses.set(question.number, { ...payload, status: '傳送中' });
+    inputs.forEach((input) => { input.disabled = true; });
+    button.disabled = true;
+    button.textContent = '傳送中';
+    sendAnswer(outgoing);
   });
   card.append(button);
   return card;
@@ -138,11 +238,15 @@ function renderState(value) {
     start.textContent = betweenQuestions ? '開始下一題' : '開始搶答';
     const finish = document.querySelector('#finish');
     finish.disabled = value.phase !== '搶答中' && !betweenQuestions;
-    finish.textContent = value.currentQuestionNumber && !betweenQuestions && value.phase === '搶答中' ? '關閉本題' : '結束搶答';
-    document.querySelector('#writeback').disabled = value.phase !== '已結束';
+    finish.textContent = value.independentQuestions ? '結算搶答' : value.currentQuestionNumber && !betweenQuestions && value.phase === '搶答中' ? '關閉本題' : '結束搶答';
+    document.querySelector('#writeback').disabled = value.phase !== '已結束' || value.writebackStatus === '寫入中';
+    document.querySelector('#writeback-status').textContent = value.writebackStatus
+      ? `Google Sheets ${value.writebackStatus}${value.writebackError ? `｜${value.writebackError}` : ''}` : '';
     document.querySelector('#download-csv').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#new-activity').classList.toggle('hidden', value.phase !== '已結束');
     document.querySelector('#open-reveal').classList.toggle('hidden', value.phase !== '已結束');
+    document.querySelector('#publish-results').classList.toggle('hidden',
+      value.phase !== '已結束' || !value.revealModeActive || value.revealIndex >= value.questions.length);
     document.querySelector('#timer-limit').disabled = !canEdit;
     document.querySelector('#custom-seconds').disabled = !canEdit;
     document.querySelector('#save-timer').disabled = !canEdit;
@@ -156,15 +260,18 @@ function renderState(value) {
     const heading = document.createElement('h3');
     heading.textContent = '即時作答紀錄';
     answerList.append(heading);
-    value.submissions.forEach((entry) => {
+    const ordered = [...value.submissions].sort((a, b) => a.questionNumber.localeCompare(b.questionNumber, 'zh-Hant', { numeric: true }) ||
+      (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.sequence - b.sequence);
+    ordered.forEach((entry) => {
       const row = document.createElement('article');
       row.className = 'submission';
       const group = document.createElement('strong');
-      group.textContent = `第 ${entry.group} 組・第 ${entry.questionNumber} 題`;
+      group.textContent = `${entry.studentId ? `學號 ${entry.studentId}・` : ''}第 ${entry.group} 組・第 ${entry.questionNumber} 題`;
       const content = document.createElement('p');
+      const winnerLabel = entry.successful ? (entry.confirmed === false ? '（暫定第一名）' : '（搶答成功）') : '';
       content.textContent = value.fairModeEnabled
-        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`
-        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${entry.successful ? '（搶答成功）' : ''}`;
+        ? `答案：${entry.answers.join('、')}｜實際時間 ${entry.receivedAt}｜加權 ${entry.penaltySeconds} 秒｜判定時間 ${entry.judgedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${winnerLabel}`
+        : `答案：${entry.answers.join('、')}｜${entry.receivedAt}｜順位 ${entry.rejected ? '已駁回' : entry.rank}${winnerLabel}`;
       row.append(group, content);
       if (!canEdit) {
         const review = document.createElement('button');
@@ -181,6 +288,7 @@ function renderState(value) {
       }
       answerList.append(row);
     });
+    renderTeacherControls(value);
     renderLeaderboard(value.leaderboard);
     const summary = document.querySelector('#import-summary');
     if (value.questions.length) summary.textContent = `共 ${value.questions.length} 題；每題小題數：${value.questions.map((question) => `${question.number}題 ${question.subquestions.length}小題`).join('、')}`;
@@ -194,28 +302,48 @@ function renderState(value) {
     const fairStatus = document.querySelector('#fair-mode-status');
     fairStatus.textContent = '公平模式已開啟';
     fairStatus.classList.toggle('hidden', !value.fairModeEnabled);
+    const activeInput = document.activeElement;
+    const activeQuestion = activeInput?.dataset?.answerIndex !== undefined
+      ? activeInput.closest('.question')?.dataset.questionNumber : undefined;
     studentWork.replaceChildren();
     answerList.replaceChildren();
-    if (value.phase !== '已結束') {
+    if (value.phase !== '已結束' || answerStatuses.size || value.submissions?.length) {
       const ownSubmissions = new Map((value.submissions ?? []).map((entry) => [entry.questionNumber, entry]));
+      for (const [number, entry] of answerStatuses) ownSubmissions.set(number, entry);
       value.questions.forEach((question) => {
-        const canAnswer = value.phase === '搶答中' && (!value.currentQuestionNumber || value.currentQuestionNumber === question.number);
+        const canAnswer = value.independentQuestions ? question.open : value.phase === '搶答中' && (!value.currentQuestionNumber || value.currentQuestionNumber === question.number);
+        if (value.phase === '已結束' && !ownSubmissions.has(question.number)) return;
         const card = createQuestionCard(question, canAnswer);
+        if (value.independentQuestions) appendQuestionTime(card, question, value);
         const saved = ownSubmissions.get(question.number);
         if (saved) {
           answerDrafts.delete(question.number);
-          card.querySelectorAll('input').forEach((input, index) => { input.value = saved.answers[index] ?? ''; input.disabled = true; });
+          card.querySelectorAll('input').forEach((input, index) => { input.value = saved.answers?.[index] ?? ''; input.disabled = true; });
           card.querySelector('button').disabled = true;
+          card.querySelector('button').textContent = saved.status ?? '已送出';
           const done = document.createElement('p');
           done.className = 'success';
-          done.textContent = '本組已提交';
+          done.textContent = saved.status === '未計入' ? `未計入：${saved.error}`
+            : saved.status === '已截止' ? '題目已截止' : '你的答案已鎖定';
           card.append(done);
         }
         studentWork.append(card);
+        if (activeQuestion === question.number) {
+          const replacement = card.querySelectorAll('input')[Number(activeInput.dataset.answerIndex)];
+          if (replacement && !replacement.disabled) {
+            replacement.focus({ preventScroll: true });
+            replacement.setSelectionRange(activeInput.selectionStart, activeInput.selectionEnd);
+          }
+        }
       });
+      if (value.phase === '準備中' || (value.independentQuestions && !value.questions.some((question) => question.open) && value.phase !== '已結束')) {
+        const waiting = document.createElement('p');
+        waiting.textContent = '等待老師發布題目';
+        studentWork.append(waiting);
+      }
       studentWork.classList.remove('hidden');
-    } else {
-      studentWork.classList.add('hidden');
+    } else studentWork.classList.add('hidden');
+    if (value.phase === '已結束') {
       const heading = document.createElement('h3');
       heading.textContent = value.fairModeEnabled ? '搶答結果（公平模式）' : '搶答結果（未使用公平模式）';
       results.replaceChildren(heading);
@@ -224,8 +352,13 @@ function renderState(value) {
         const row = document.createElement('article');
         row.className = 'result';
         const text = document.createElement('p');
-        text.textContent = winner ? (winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`) : `第 ${question.number} 題：尚未揭曉`;
+        text.textContent = winner ? (winner.group ? `第 ${winner.questionNumber} 題：第 ${winner.group} 組搶答成功${winner.studentId ? `（學號 ${winner.studentId}）` : ''}，答案：${winner.answers.join('、')}` : `第 ${winner.questionNumber} 題：${winner.noCorrectAnswer ? '無人答對' : '沒有組別提交答案'}`) : `第 ${question.number} 題：尚未揭曉`;
         row.append(text);
+        if (winner) {
+          const team = document.createElement('p');
+          team.textContent = winner.group === currentRole.group ? '我們組搶到了' : '我們組沒有搶到';
+          row.append(team);
+        }
         results.append(row);
       });
       (value.rejectedSubmissions ?? []).forEach((entry) => {
@@ -236,7 +369,7 @@ function renderState(value) {
         row.append(text);
         results.append(row);
       });
-      if (value.leaderboard) renderLeaderboard(value.leaderboard);
+      renderLeaderboard(value.leaderboard);
     }
   }
   renderTimer();
@@ -273,7 +406,7 @@ function renderReveal(value) {
       : (value.winners ?? []).find((entry) => entry.questionNumber === question.number);
     const answer = document.createElement('p');
     answer.className = 'reveal-answer';
-    answer.textContent = winner?.group ? `第 ${winner.group} 組｜${winner.answers.join('、')}｜順位 1` : '無人答對';
+    answer.textContent = winner?.group ? `第 ${winner.group} 組｜${winner.studentId ? `學號 ${winner.studentId}｜` : ''}${winner.answers.join('、')}｜順位 1` : '無人答對';
     revealStage.append(answer);
   }
   if (currentRole === 'teacher') {
@@ -290,8 +423,9 @@ async function changeReveal(index) {
   catch (error) { showNotice(error.message, true); }
 }
 
+document.querySelector('#publish-results').addEventListener('click', () => changeReveal(latestState.questions.length));
 document.querySelector('#open-reveal').addEventListener('click', () => {
-  teacherRevealOpen = true; revealStage.classList.remove('hidden'); revealStage.requestFullscreen?.(); renderReveal(latestState); changeReveal(-1);
+  teacherRevealOpen = true; revealStage.classList.remove('hidden'); revealStage.requestFullscreen?.(); renderReveal(latestState);
 });
 document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) { teacherRevealOpen = false; revealStage.classList.add('hidden'); } });
 document.addEventListener('keydown', (event) => {
@@ -299,10 +433,89 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault(); changeReveal((latestState?.revealIndex ?? -1) + (event.key === 'ArrowRight' ? 1 : -1));
 });
 
+function appendQuestionTime(container, question, state) {
+  const status = document.createElement('span');
+  status.textContent = question.open ? ' 開放中' : ' 未開放';
+  if (question.open && question.deadlineAt != null) {
+    status.dataset.deadline = String(performance.now() + question.deadlineAt - state.timer.serverNow);
+    status.className = 'question-countdown';
+  }
+  container.append(status);
+}
+
+function renderTeacherControls(value) {
+  const controls = document.querySelector('#question-controls');
+  controls.replaceChildren();
+  if (value.phase === '準備中' || (value.independentQuestions && value.phase !== '已結束')) {
+    value.questions.forEach((question) => {
+      const row = document.createElement('p');
+      row.textContent = `第 ${question.number} 題 `;
+      appendQuestionTime(row, question, value);
+      const button = document.createElement('button');
+      button.textContent = question.open ? '停止搶答' : '開始搶答';
+      button.onclick = async () => {
+        try {
+          await api(`/api/questions/${encodeURIComponent(question.number)}/${question.open ? 'close' : 'open'}`, { method: 'POST', body: '{}' });
+        } catch (error) { showNotice(error.message, true); }
+      };
+      row.append(button);
+      controls.append(row);
+    });
+  }
+  if (value.phase === '已結束') {
+    for (const [index, question] of value.questions.entries()) {
+      const visible = value.revealedQuestions ? value.revealedQuestions.includes(question.number)
+        : !value.revealModeActive || index <= value.revealIndex;
+      const button = document.createElement('button');
+      button.textContent = `第 ${question.number} 題${visible ? '：已公布' : '：公布結果'}`;
+      button.disabled = visible;
+      button.onclick = async () => {
+        try {
+          await api(`/api/reveal/question/${encodeURIComponent(question.number)}`, { method: 'POST', body: JSON.stringify({ visible: true }) });
+        } catch (error) { showNotice(error.message, true); }
+      };
+      controls.append(button);
+    }
+  }
+  const roster = document.querySelector('#student-groups');
+  roster.replaceChildren();
+  for (const student of value.students ?? []) {
+    const row = document.createElement('label');
+    row.textContent = `學號 ${student.studentId} `;
+    const select = document.createElement('select');
+    for (let group = 1; group <= value.groupCount; group += 1) {
+      const option = document.createElement('option');
+      option.value = String(group);
+      option.textContent = `第 ${group} 組`;
+      select.append(option);
+    }
+    select.value = String(student.group);
+    select.disabled = value.phase === '已結束' || value.submissions.some((entry) => entry.studentId === student.studentId);
+    select.onchange = async () => {
+      try {
+        await api('/api/groups/student', { method: 'POST', body: JSON.stringify({ studentId: student.studentId, group: Number(select.value) }) });
+      } catch (error) {
+        select.value = String(student.group);
+        showNotice(error.message, true);
+      }
+    };
+    row.append(select);
+    roster.append(row);
+  }
+}
+
 function renderTimer() {
+  for (const label of document.querySelectorAll('.question-countdown')) {
+    label.textContent = ` 剩餘 ${Math.max(0, Math.ceil((Number(label.dataset.deadline) - performance.now()) / 1000))} 秒 `;
+  }
   const display = document.querySelector('#timer-display');
   const phase = latestState?.phase;
   const limit = latestState?.timer?.limitSeconds;
+  if (latestState?.independentQuestions && phase !== '已結束') {
+    display.textContent = '各題獨立計時';
+    display.classList.remove('urgent');
+    return;
+  }
   if (phase !== '搶答中' || timerAnchorRemaining === null) {
     if (phase === '題目已關閉' || phase === '已結束') display.textContent = phase;
     else if (limit == null) display.textContent = '不限時';
@@ -331,7 +544,47 @@ function renderLeaderboard(rows) {
   });
 }
 
-document.querySelector('#join').addEventListener('click', connect);
+document.querySelector('#student-login').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const groupEntry = document.querySelector('#group-entry');
+    const studentId = document.querySelector('#student-id').value;
+    const group = groupEntry.classList.contains('hidden') ? undefined : Number(groupSelect.value);
+    const result = await api('/api/session/student', { method: 'POST', body: JSON.stringify({ studentId, group }) });
+    if (result.requiresGroup) {
+      groupEntry.classList.remove('hidden');
+      return showNotice('請選擇本輪組別，再按學生登入。');
+    }
+    await connect(result.identity);
+  } catch (error) { showNotice(error.message, true); }
+});
+
+document.querySelector('#student-id').addEventListener('input', () => {
+  document.querySelector('#group-entry').classList.add('hidden');
+});
+
+document.querySelector('#teacher-login').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const password = document.querySelector('#teacher-password');
+  try {
+    const result = await api('/api/session/teacher', { method: 'POST', body: JSON.stringify({
+      username: document.querySelector('#teacher-username').value, password: password.value
+    }) });
+    await connect(result.identity);
+  } catch (error) { showNotice(error.message, true); }
+  finally { password.value = ''; }
+});
+
+document.querySelector('#logout').addEventListener('click', async () => {
+  try {
+    if (currentRole !== 'teacher') {
+      answerDrafts.clear();
+      saveDrafts();
+    }
+    await api('/api/session/logout', { method: 'POST', body: '{}' });
+    window.location.reload();
+  } catch (error) { showNotice(error.message, true); }
+});
 document.querySelector('#group-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try { const response = await api('/api/groups', { method: 'POST', body: JSON.stringify({ groupCount: Number(document.querySelector('#group-count').value) }) }); updateGroupOptions(response.groupCount); showNotice('組數已更新。'); }
@@ -384,14 +637,14 @@ document.querySelector('#start').addEventListener('click', async () => {
 });
 document.querySelector('#finish').addEventListener('click', async () => {
   try {
-    const result = await api('/api/phase/finish', { method: 'POST', body: '{}' });
+    const result = await api('/api/phase/finish', { method: 'POST', body: JSON.stringify({ reveal: document.querySelector('#settle-hidden').checked }) });
     showNotice(result.phase === '題目已關閉' ? '本題已關閉。' : '搶答已結束。');
   } catch (error) { showNotice(error.message, true); }
 });
 document.querySelector('#writeback').addEventListener('click', async () => { try { const result = await api('/api/worksheet/writeback', { method: 'POST', body: '{}' }); showNotice(result.message); } catch (error) { showNotice(error.message, true); } });
 document.querySelector('#download-csv').addEventListener('click', async () => {
   try {
-    const response = await fetch('/api/results.csv', { headers: { 'X-Quiz-Role': 'teacher' } });
+    const response = await fetch('/api/results.csv');
     if (!response.ok) {
       const result = await response.json();
       throw new Error(result.error || '下載失敗，請稍後再試。');
@@ -415,12 +668,17 @@ document.querySelector('#new-activity').addEventListener('click', () => {
   });
 });
 
-async function initialize() {
+async function initializeInfo() {
   const info = await api('/api/info');
   updateGroupOptions(info.groupCount);
   document.querySelector('#service-account').textContent = info.serviceAccountEmail
     ? `服務帳號：${info.serviceAccountEmail}。請先把試算表共用給這個 email（編輯者）。`
     : '尚未讀取到服務帳號。請確認專案根目錄 credentials.json 格式正確。';
+}
+async function initialize() {
+  await initializeInfo();
+  const { identity } = await api('/api/session');
+  if (identity) await connect(identity);
 }
 initialize().catch((error) => showNotice(error.message, true));
 setInterval(renderTimer, 250);

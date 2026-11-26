@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:stress": "node test-support/stress.js"
   },
   "dependencies": {
     "express": "^4.21.2",

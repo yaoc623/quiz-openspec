@@ -1,6 +1,7 @@
+const { submitFixture } = require('../test-support/state-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { io: createClient } = require('socket.io-client');
+const { authenticatedClient: createClient, teacherCookie, teacherOptions } = require('../test-support/login');
 const { createQuizServer } = require('../src/server');
 const { once } = require('node:events');
 
@@ -10,7 +11,7 @@ function nextEvent(socket, eventName) {
 
 async function request(base, path, body) {
   const response = await fetch(`${base}${path}`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify(body)
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: await teacherCookie(base) }, body: JSON.stringify(body)
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
@@ -20,7 +21,7 @@ async function request(base, path, body) {
 test('教師和兩組學生同步 10 秒逐題期限，逾時、重連與舊排程互不干擾', { timeout: 10000 }, async (t) => {
   let now = 1000;
   const timers = [];
-  const service = createQuizServer({
+  const service = createQuizServer({ ...teacherOptions,
     now: () => now,
     setTimeout(callback, delay) {
       const timer = { callback, delay, cleared: false };
@@ -127,7 +128,7 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     { label: 'a', target: { sheet: '練習單', row: 6, column: 4 } },
     { label: 'b', target: { sheet: '練習單', row: 7, column: 4 } }
   ] }] };
-  const service = createQuizServer({
+  const service = createQuizServer({ ...teacherOptions,
     readCredentials: () => ({ client_email: 'quiz-service@example.test' }),
     importWorksheet: async (url) => {
       importUrls.push(url);
@@ -148,11 +149,11 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const home = await fetch(base);
     assert.equal(home.status, 200);
     assert.match(await home.text(), /課堂搶答系統/);
-    const info = await fetch(`${base}/api/info`).then((response) => response.json());
+    const info = await fetch(`${base}/api/info`, { headers: { cookie: await teacherCookie(base) } }).then((response) => response.json());
     assert.equal(info.groupCount, 4);
     assert.equal(info.serviceAccountEmail, 'quiz-service@example.test');
     assert.equal((await request(base, '/api/groups', { groupCount: 2 })).groupCount, 2);
-    const importFailure = await fetch(`${base}/api/worksheet/import`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ url: 'mock-url' }) });
+    const importFailure = await fetch(`${base}/api/worksheet/import`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: await teacherCookie(base) }, body: JSON.stringify({ url: 'mock-url' }) });
     assert.equal(importFailure.status, 400);
     assert.match((await importFailure.json()).error, /試算表操作失敗/);
     assert.equal(service.state.worksheet, null);
@@ -201,8 +202,9 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     const twoSecond = nextEvent(teamTwo, 'state');
     const oneSecond = nextEvent(teamOne, 'state');
     const second = await new Promise((resolve) => teamTwo.emit('answer:submit', { questionNumber: '1', answers: ['二甲', '二乙'] }, resolve));
-    assert.equal(second.entry.rank, 2);
-    await Promise.all([teacherSecond, twoSecond, oneSecond]);
+    assert.deepEqual(second, { ok: true, status: '已送出' });
+    const [teacherAfterSecond] = await Promise.all([teacherSecond, twoSecond, oneSecond]);
+    assert.equal(teacherAfterSecond.submissions[1].rank, 2);
 
     const teacherFinished = nextEvent(teacher, 'state');
     const oneFinished = nextEvent(teamOne, 'state');
@@ -217,7 +219,7 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
     assert.equal(writeback.updatedCells, 2);
     assert.deepEqual(writes.map((item) => item.values[0][0]), ['一甲', '一乙']);
     failWriteback = true;
-    const writebackFailure = await fetch(`${base}/api/worksheet/writeback`, { method: 'POST', headers: { 'x-quiz-role': 'teacher' } });
+    const writebackFailure = await fetch(`${base}/api/worksheet/writeback`, { method: 'POST', headers: { cookie: await teacherCookie(base) } });
     assert.equal(writebackFailure.status, 400);
     assert.match((await writebackFailure.json()).error, /試算表操作失敗/);
     assert.equal(service.state.writebackCompleted, true);
@@ -284,7 +286,7 @@ test('HTTP 與三個 Socket.IO 角色完成匯入、作答、結果及 mock 回�
 test('計時設定由伺服器控時，到期同步結束且重新連線取得正確剩餘時間', { timeout: 10000 }, async () => {
   let now = 100000;
   let scheduled;
-  const service = createQuizServer({
+  const service = createQuizServer({ ...teacherOptions,
     now: () => now,
     setTimeout: (callback, delay) => { scheduled = { callback, delay }; return scheduled; },
     clearTimeout: () => {},
@@ -301,7 +303,7 @@ test('計時設定由伺服器控時，到期同步結束且重新連線取得�
     const denied = await fetch(`${base}/api/timer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ limitSeconds: 30 }) });
     assert.equal(denied.status, 403);
     await request(base, '/api/worksheet/import', { url: 'mock-url' });
-    const bad = await fetch(`${base}/api/timer`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ limitSeconds: 0 }) });
+    const bad = await fetch(`${base}/api/timer`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: await teacherCookie(base) }, body: JSON.stringify({ limitSeconds: 0 }) });
     assert.equal(bad.status, 400);
     await request(base, '/api/timer', { limitSeconds: 30 });
     const beforeStart = service.state.timerSnapshot();
@@ -321,7 +323,7 @@ test('計時設定由伺服器控時，到期同步結束且重新連線取得�
     const ended = await teacherEnded;
     assert.equal(ended.phase, '已結束');
     assert.equal(service.state.finishedAt, 130000);
-    const manualFinish = await fetch(`${base}/api/phase/finish`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: '{}' });
+    const manualFinish = await fetch(`${base}/api/phase/finish`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: await teacherCookie(base) }, body: '{}' });
     assert.equal(manualFinish.status, 400);
   } finally {
     clients.forEach((client) => client.close());
@@ -333,7 +335,7 @@ test('老師提前結束計時活動會取消期限排程且不會重複結束',
   let now = 5000;
   let scheduled;
   const cleared = [];
-  const service = createQuizServer({ now: () => now, setTimeout: (callback, delay) => (scheduled = { callback, delay }), clearTimeout: (timer) => cleared.push(timer), readCredentials: () => ({ client_email: 'quiz@example.test' }), importWorksheet: async () => ({ spreadsheetId: 'sheet', parsed: { sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] }, serviceAccountEmail: 'quiz@example.test' }) });
+  const service = createQuizServer({ ...teacherOptions, now: () => now, setTimeout: (callback, delay) => (scheduled = { callback, delay }), clearTimeout: (timer) => cleared.push(timer), readCredentials: () => ({ client_email: 'quiz@example.test' }), importWorksheet: async () => ({ spreadsheetId: 'sheet', parsed: { sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] }, serviceAccountEmail: 'quiz@example.test' }) });
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   try {
     await request(`http://127.0.0.1:${service.server.address().port}`, '/api/worksheet/import', { url: 'mock-url' });
@@ -352,7 +354,7 @@ test('老師提前結束計時活動會取消期限排程且不會重複結束',
 });
 
 test('公平模式設定只限老師，推送明細不洩漏給學生且結果標示模式', { timeout: 10000 }, async () => {
-  const service = createQuizServer({ readCredentials: () => ({ client_email: 'quiz@example.test' }) });
+  const service = createQuizServer({ ...teacherOptions, readCredentials: () => ({ client_email: 'quiz@example.test' }) });
   service.state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{}] }] });
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
@@ -368,7 +370,7 @@ test('公平模式設定只限老師，推送明細不洩漏給學生且結果�
     assert.equal('fairDelaySeconds' in initialOne, false);
     const denied = await fetch(`${base}/api/fair-mode`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, delaySeconds: 3 }) });
     assert.equal(denied.status, 403);
-    const invalid = await fetch(`${base}/api/fair-mode`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-quiz-role': 'teacher' }, body: JSON.stringify({ enabled: true, delaySeconds: 0 }) });
+    const invalid = await fetch(`${base}/api/fair-mode`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: await teacherCookie(base) }, body: JSON.stringify({ enabled: true, delaySeconds: 0 }) });
     assert.equal(invalid.status, 400);
 
     const teacherConfigured = nextEvent(teacher, 'state');
@@ -407,7 +409,7 @@ test('公平模式設定只限老師，推送明細不洩漏給學生且結果�
     assert.equal(finalTeacher.fairModeEnabled, true);
     assert.equal(finalStudent.fairModeEnabled, true);
     assert.deepEqual(finalStudent.winners[0].answers, ['甲']);
-    assert.equal('submissions' in finalStudent, false);
+    assert.deepEqual(finalStudent.submissions[0].answers, ['甲']);
   } finally {
     clients.forEach((client) => client.close());
     await new Promise((resolve) => service.io.close(resolve));
@@ -415,11 +417,11 @@ test('公平模式設定只限老師，推送明細不洩漏給學生且結果�
 });
 
 test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP 操作不能駁回', { timeout: 10000 }, async () => {
-  const service = createQuizServer({ readCredentials: () => ({ client_email: 'quiz@example.test' }) });
+  const service = createQuizServer({ ...teacherOptions, readCredentials: () => ({ client_email: 'quiz@example.test' }) });
   service.state.setWorksheet({ sheet: '題目', questions: [{ number: '1', subquestions: [{}] }] });
   service.state.start();
-  const first = service.state.submit(1, '1', ['一組答案']);
-  service.state.submit(2, '1', ['二組答案']);
+  const first = submitFixture(service.state, 1, '1', ['一組答案'], undefined, '900001');
+  submitFixture(service.state, 2, '1', ['二組答案']);
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
   const clients = [];
@@ -437,7 +439,7 @@ test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP �
     assert.equal(teacherState.submissions.find((entry) => entry.sequence === first.sequence).rejected, true);
     assert.equal(teacherState.submissions.find((entry) => entry.group === 2).successful, true);
     assert.equal(studentState.submissions.length, 1);
-    assert.equal(studentState.submissions[0].rejected, true);
+    assert.equal(studentState.submissions[0].rejected, undefined);
     const restored = nextEvent(teacher, 'state');
     await request(base, `/api/submissions/${first.sequence}/restore`, {});
     assert.equal((await restored).submissions[0].successful, true);
@@ -449,35 +451,34 @@ test('老師駁回與取消駁回即時同步順位，學生與未授權 HTTP �
 
 test('CSV 下載僅限老師於活動結束後使用且回應包含完整 UTF-8 CSV', { timeout: 10000 }, async () => {
   let now = Date.parse('2026-11-20T08:34:56.789Z');
-  const service = createQuizServer({ now: () => now });
+  const service = createQuizServer({ ...teacherOptions, now: () => now });
   service.state.setGroupCount(2);
   service.state.setWorksheet({ questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{ label: 'a' }, { label: 'b' }] }] });
   service.state.start();
-  service.state.submit(1, '1', ['答案,"含引號"']);
-  service.state.submit(2, '2', ['題組甲', '題組乙']);
+  submitFixture(service.state, 1, '1', ['答案,"含引號"']);
+  submitFixture(service.state, 2, '2', ['題組甲', '題組乙']);
   await new Promise((resolve) => service.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${service.server.address().port}`;
   try {
-    const early = await fetch(`${base}/api/results.csv`, { headers: { 'x-quiz-role': 'teacher' } });
+    const early = await fetch(`${base}/api/results.csv`, { headers: { cookie: await teacherCookie(base) } });
     assert.equal(early.status, 400);
     service.state.finish();
     const denied = await fetch(`${base}/api/results.csv`);
     assert.equal(denied.status, 403);
-    const response = await fetch(`${base}/api/results.csv`, { headers: { 'x-quiz-role': 'teacher' } });
+    const response = await fetch(`${base}/api/results.csv`, { headers: { cookie: await teacherCookie(base) } });
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /text\/csv; charset=utf-8/);
     assert.equal(response.headers.get('content-disposition'), 'attachment; filename="quiz-result-20261120-163456.csv"');
     const bytes = Buffer.from(await response.arrayBuffer());
     assert.deepEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
     const content = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes);
-    assert.match(content, /1,,1,"答案,""含引號"""/);
-    assert.match(content, /1,,2,,,,,未作答,否/);
-    assert.match(content, /2,b,2,題組乙/);
+    assert.match(content, /1,1,.*?,900001,1,"答案,""含引號"""/);
+    assert.match(content, /2,2,.*?,900002,2,.*題組甲.*題組乙/);
   } finally { await new Promise((resolve) => service.io.close(resolve)); }
 });
 
 test('揭曉控制限教師，學生即時只收到已揭曉結果且重連取得目前進度', { timeout: 10000 }, async () => {
-  const service = createQuizServer({
+  const service = createQuizServer({ ...teacherOptions,
     readCredentials: () => ({ client_email: 'quiz-service@example.test' }),
     importWorksheet: async () => ({ spreadsheetId: 'reveal-sheet', parsed: { questions: [{ number: '1', subquestions: [{}] }, { number: '2', subquestions: [{}] }] } })
   });
@@ -490,7 +491,7 @@ test('揭曉控制限教師，學生即時只收到已揭曉結果且重連取�
     const student = connect('student', 1);
     await Promise.all([nextEvent(teacher, 'state'), nextEvent(student, 'state')]);
     await request(base, '/api/worksheet/import', { url: 'mock-url' });
-    service.state.start(); service.state.submit(1, '1', ['已揭曉答案']); service.state.submit(1, '2', ['尚未揭曉答案']); service.state.finish();
+    service.state.start(); submitFixture(service.state, 1, '1', ['已揭曉答案']); submitFixture(service.state, 1, '2', ['尚未揭曉答案'], undefined, '900003'); service.state.finish();
     const initial = nextEvent(student, 'state');
     await request(base, '/api/reveal', { index: -1 });
     const hidden = await initial;

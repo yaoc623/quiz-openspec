@@ -3,7 +3,7 @@ schema: spec-driven
 context: |
   專案：課堂搶答系統（軟體工程期末專題），使用 OpenSpec 流程開發。
   技術：Node.js、Express、Socket.IO、googleapis；前端使用純 HTML、CSS、JavaScript。
-  資料存於記憶體，僅在本機 localhost:3000 執行。
+  帳號、活動及作答佇列持久化至本機私有 JSON 檔，服務僅在 localhost:3000 執行。
   Google 金鑰存於專案根目錄 credentials.json，絕不可寫入程式碼，且必須列入 .gitignore。
   必須透過 Google Sheets API 直接讀寫雲端試算表，不可下載成 xlsx。
   不得寫死試算表儲存格位置；所有位置必須由程式掃描試算表算出。
